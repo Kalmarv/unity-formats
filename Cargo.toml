@@ -1,6 +1,6 @@
 [package]
-name = "primase-dds"
-description = "DDS read and write (legacy FourCC and DX10 headers)"
+name = "primase-glb"
+description = "The GLB codec: the container, a strict mesh reader, a mesh-file loader and a single-mesh encoder"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,10 +11,8 @@ publish.workspace = true
 [dependencies]
 primase-core.workspace = true
 thiserror.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-primase-testdata.workspace = true
-sha2.workspace = true
