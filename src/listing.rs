@@ -52,20 +52,20 @@ pub fn list(player: &Player, classes: Option<&[&str]>) -> Result<Listing> {
             let name = match class.as_deref() {
                 // no layout for the class: nothing to walk
                 None => {
-                    *listing
-                        .unnamed
-                        .entry("class unknown to the type tree package".into())
-                        .or_default() += 1;
+                    crate::bump(
+                        &mut listing.unnamed,
+                        "class unknown to the type tree package".into(),
+                    );
                     None
                 }
                 Some(_) => match player.field(&object, "m_Name") {
                     Ok(Some(v)) => v.as_str().map(str::to_owned),
                     Ok(None) => {
-                        *listing.unnamed.entry("class has no m_Name".into()).or_default() += 1;
+                        crate::bump(&mut listing.unnamed, "class has no m_Name".into());
                         None
                     }
                     Err(e) => {
-                        *listing.unnamed.entry(e.to_string()).or_default() += 1;
+                        crate::bump(&mut listing.unnamed, e.to_string());
                         None
                     }
                 },

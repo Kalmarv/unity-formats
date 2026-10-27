@@ -727,20 +727,21 @@ impl ShaderPrograms {
                 "shader {name}: blob tables of another length than its platforms"
             )));
         }
-        let segments = (0..platforms.len())
-            .map(|i| {
-                let (o, p, u) = (&offsets[i], &packed[i], &unpacked[i]);
+        let segments = offsets
+            .iter()
+            .zip(&packed)
+            .zip(&unpacked)
+            .map(|((o, p), u)| {
                 if o.len() != p.len() || o.len() != u.len() {
                     return Err(invalid(format!(
                         "shader {name}: segment tables of different lengths"
                     )));
                 }
-                (0..o.len())
-                    .map(|k| {
-                        let size =
-                            |n: i64| usize::try_from(n).map_err(|_| invalid("shader: a negative blob size"));
-                        Ok((size(o[k])?, size(p[k])?, size(u[k])?))
-                    })
+                let size = |n: i64| usize::try_from(n).map_err(|_| invalid("shader: a negative blob size"));
+                o.iter()
+                    .zip(p)
+                    .zip(u)
+                    .map(|((&o, &p), &u)| Ok((size(o)?, size(p)?, size(u)?)))
                     .collect()
             })
             .collect::<Result<_>>()?;

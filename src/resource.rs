@@ -78,7 +78,14 @@ impl StreamingInfo {
             )));
         }
         f.seek(SeekFrom::Start(self.offset)).map_err(io)?;
-        let mut out = vec![0; self.size as usize];
+        let size = usize::try_from(self.size).map_err(|_| {
+            invalid(format!(
+                "{}: {} bytes do not fit memory",
+                path.display(),
+                self.size
+            ))
+        })?;
+        let mut out = vec![0; size];
         f.read_exact(&mut out).map_err(io)?;
         Ok(out)
     }

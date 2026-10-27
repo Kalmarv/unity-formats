@@ -74,7 +74,11 @@ pub fn read_urp_settings(bytes: &[u8]) -> Result<UnityUrpSettings> {
     r.i32()?; // m_RendererType
     r.take(12)?; // m_RendererData (a reference)
     let renderers = r.u32()?;
-    r.take(12 * usize::try_from(renderers).map_err(|_| invalid("renderer list too long"))?)?;
+    let renderers_len = usize::try_from(renderers)
+        .ok()
+        .and_then(|n| n.checked_mul(12))
+        .ok_or_else(|| invalid(format!("renderer list of {renderers} entries too long")))?;
+    r.take(renderers_len)?;
     r.i32()?; // m_DefaultRendererIndex
     r.take(8)?; // m_RequireDepthTexture, m_RequireOpaqueTexture
     r.i32()?; // m_OpaqueDownsampling
@@ -144,7 +148,11 @@ pub fn read_urp_settings(bytes: &[u8]) -> Result<UnityUrpSettings> {
         reflection_probe_box_projection,
         reflection_probe_atlas,
         shadow_distance,
-        shadow_cascades: shadow_cascades as u8,
+        shadow_cascades: u8::try_from(shadow_cascades).map_err(|_| {
+            invalid(format!(
+                "Universal Render Pipeline asset: m_ShadowCascadeCount {shadow_cascades} out of range"
+            ))
+        })?,
         soft_shadows,
         mixed_lighting,
         light_cookies,

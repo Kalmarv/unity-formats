@@ -57,7 +57,9 @@ impl SkinWeights {
     /// The setting `value` as stored.
     pub fn from_setting(value: i64) -> Result<SkinWeights> {
         match value {
-            1 | 2 | 4 => Ok(SkinWeights::Bones(value as u32)),
+            1 => Ok(SkinWeights::Bones(1)),
+            2 => Ok(SkinWeights::Bones(2)),
+            4 => Ok(SkinWeights::Bones(4)),
             255 => Ok(SkinWeights::Unlimited),
             v => Err(Error::Unsupported(format!("skinWeights {v}"))),
         }
@@ -244,7 +246,7 @@ impl Player {
             .object(r.path_id)
             .ok_or_else(|| invalid(format!("{}: no object {}", r.file, r.path_id)))?;
         self.tree(&r.file, f, o.class_id)?
-            .decode_field(f.bytes(o), f.big_endian, name)
+            .decode_field(f.bytes(o)?, f.big_endian, name)
             .map_err(|e| invalid(format!("{}/{} (class {}): {e}", r.file, r.path_id, o.class_id)))
     }
 
@@ -311,7 +313,7 @@ impl Player {
             return Err(invalid(format!("{}/{}: not a MonoBehaviour", r.file, r.path_id)));
         }
         let d = f.decode_with(o, &*self.tree(&r.file, f, o.class_id)?)?;
-        let bytes = f.bytes(o);
+        let bytes = f.bytes(o)?;
         let script = bytes
             .len()
             .checked_sub(d.rest)
@@ -518,8 +520,9 @@ impl Player {
             file.to_owned()
         } else {
             let f = self.file(file)?;
-            let ext = usize::try_from(fid - 1)
-                .ok()
+            let ext = fid
+                .checked_sub(1)
+                .and_then(|i| usize::try_from(i).ok())
                 .and_then(|i| f.externals.get(i))
                 .ok_or_else(|| {
                     invalid(format!(

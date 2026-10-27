@@ -53,6 +53,16 @@
 //! Reads are bounds-checked, and a file the readers do not understand is refused with an [`Error`] that names what
 //! was found and where.
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+// Every module reads stored bytes (the files themselves, or values decoded from them), so a panic is a defect: indexes
+// are `get`s, sums are checked or saturating, and numbers are narrowed with `try_from`. Tests index freely.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::cast_possible_truncation
+    )
+)]
 
 pub mod animator;
 pub mod clip;
@@ -107,6 +117,21 @@ pub enum Error {
 
 /// A read's result.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// A double narrowed to the nearest `f32`: the rounding is the intent, so the truncation lint does not apply.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "float narrowing rounds to the nearest f32 by design"
+)]
+pub(crate) fn narrow(x: f64) -> f32 {
+    x as f32
+}
+
+/// Count one more of `key` in `counts`, stopping at `u64::MAX`.
+pub(crate) fn bump<K: Ord>(counts: &mut std::collections::BTreeMap<K, u64>, key: K) {
+    let n = counts.entry(key).or_default();
+    *n = n.saturating_add(1);
+}
 
 pub(crate) fn invalid(msg: impl Into<String>) -> Error {
     Error::Invalid(msg.into())

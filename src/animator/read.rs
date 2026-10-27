@@ -636,8 +636,10 @@ impl UnityAnimatorController {
             let selectors = machine.selectors.len() as i64;
             // a destination is a state (below SELECTOR_BASE) or SELECTOR_BASE plus a selector node (an exit, or an entry
             // of another machine)
-            let reaches =
-                |d: i64| (0..states).contains(&d) || (SELECTOR_BASE..SELECTOR_BASE + selectors).contains(&d);
+            let reaches = |d: i64| {
+                (0..states).contains(&d)
+                    || (SELECTOR_BASE..SELECTOR_BASE.saturating_add(selectors)).contains(&d)
+            };
             for t in machine
                 .states
                 .iter()

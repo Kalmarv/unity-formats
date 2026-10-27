@@ -27,6 +27,7 @@ Do not attach game files, extracted assets, type tree packages made from a game,
 ## Changing the code
 
 - Keep public items documented, and keep refusals naming what was found and where.
+- Library code (outside tests) denies `clippy::indexing_slicing`, `clippy::arithmetic_side_effects` and `clippy::cast_possible_truncation` (`src/lib.rs`): read with `get`, `checked_*`/`saturating_*` and `try_from`, and report a failure as an `Error` naming the offset.
 - Reads of untrusted lengths and indices are checked against the bytes that exist before anything is allocated for them; add a test with synthetic bytes next to behaviour you change.
 - A module's docs say what it refuses; lifting a refusal changes those docs and the README's "What it does not do" list too.
 
