@@ -80,8 +80,9 @@ pub struct Blend {
 }
 
 impl Blend {
-    /// `influences` to a vertex from lists padded to four with zero weights.
+    /// `influences` (at most four) to a vertex from lists padded to four with zero weights.
     pub fn from_padded(influences: usize, weights: &[[f32; 4]], bones: &[[u32; 4]]) -> Blend {
+        let influences = influences.min(4);
         Blend {
             starts: (0..=weights.len()).map(|v| (v * influences) as u32).collect(),
             weights: weights
@@ -316,11 +317,12 @@ fn read_shapes(m: &Value, name: &str, vertex_count: usize) -> Result<Option<Mesh
         .iter()
         .map(|v| {
             let index = int(v, "index")?;
-            if index < 0 || index as usize >= vertex_count {
+            let Some(slot) = usize::try_from(index).ok().filter(|&i| i < vertex_count) else {
                 return Err(invalid(format!("{what}: vertex {index} of {vertex_count}")));
-            }
+            };
             let entry = ShapeVertex {
-                index: index as u32,
+                index: u32::try_from(slot)
+                    .map_err(|_| invalid(format!("{what}: vertex {index} of {vertex_count}")))?,
                 position: vec3(v, "vertex", &what)?,
                 normal: vec3(v, "normal", &what)?,
                 tangent: vec3(v, "tangent", &what)?,
@@ -341,13 +343,12 @@ fn read_shapes(m: &Value, name: &str, vertex_count: usize) -> Result<Option<Mesh
         .iter()
         .zip(full_weights)
         .map(|(f, &weight)| {
-            let (first, count) = (int(f, "firstVertex")?, int(f, "vertexCount")?);
-            if first < 0 || count < 0 || (first + count) as usize > vertices.len() {
-                return Err(invalid(format!(
-                    "{what}: entries {first}+{count} of {}",
-                    vertices.len()
-                )));
-            }
+            let range = run(
+                int(f, "firstVertex")?,
+                int(f, "vertexCount")?,
+                vertices.len(),
+                &what,
+            )?;
             let flag = |k: &str| {
                 f.get(k)
                     .and_then(Value::as_bool)
@@ -355,8 +356,8 @@ fn read_shapes(m: &Value, name: &str, vertex_count: usize) -> Result<Option<Mesh
             };
             Ok(ShapeFrame {
                 weight,
-                first: first as usize,
-                count: count as usize,
+                first: range.start,
+                count: range.len(),
                 normals: flag("hasNormals")?,
                 tangents: flag("hasTangents")?,
             })
@@ -365,14 +366,11 @@ fn read_shapes(m: &Value, name: &str, vertex_count: usize) -> Result<Option<Mesh
     let channels = channels
         .iter()
         .map(|c| {
-            let (first, count) = (int(c, "frameIndex")?, int(c, "frameCount")?);
-            if first < 0 || count < 1 || (first + count) as usize > frames.len() {
-                return Err(invalid(format!(
-                    "{what}: frames {first}+{count} of {}",
-                    frames.len()
-                )));
-            }
-            let own = &frames[first as usize..(first + count) as usize];
+            let range = run(int(c, "frameIndex")?, int(c, "frameCount")?, frames.len(), &what)?;
+            let own = frames
+                .get(range.clone())
+                .filter(|own| !own.is_empty())
+                .ok_or_else(|| invalid(format!("{what}: a channel of {} frames", range.len())))?;
             if !own.windows(2).all(|p| p[0].weight < p[1].weight)
                 || own.iter().any(|f| !f.weight.is_finite() || f.weight == 0.0)
             {
@@ -382,9 +380,9 @@ fn read_shapes(m: &Value, name: &str, vertex_count: usize) -> Result<Option<Mesh
             }
             Ok(ShapeChannel {
                 name: c.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
-                name_hash: int(c, "nameHash")? as u32,
-                first_frame: first as usize,
-                frames: count as usize,
+                name_hash: uint(c, "nameHash", &what)?,
+                first_frame: range.start,
+                frames: range.len(),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -399,6 +397,22 @@ fn int(v: &Value, k: &str) -> Result<i64> {
     v.get(k)
         .and_then(Value::as_i64)
         .ok_or_else(|| invalid(format!("mesh: no integer {k}")))
+}
+
+/// The integer field `k` of `v` as a `u32`: a stored value outside 0..=2^32-1 is refused, not wrapped.
+fn uint(v: &Value, k: &str, what: &str) -> Result<u32> {
+    let n = int(v, k)?;
+    u32::try_from(n).map_err(|_| invalid(format!("{what}: {k} {n} is not a 32-bit unsigned number")))
+}
+
+/// The run `first..first + count` of a list of `len` entries, from stored integers: negative numbers, a sum that
+/// overflows and a run past the list are refused.
+fn run(first: i64, count: i64, len: usize, what: &str) -> Result<std::ops::Range<usize>> {
+    first
+        .checked_add(count)
+        .and_then(|end| Some(usize::try_from(first).ok()?..usize::try_from(end).ok()?))
+        .filter(|r| r.end <= len && count >= 0)
+        .ok_or_else(|| invalid(format!("{what}: entries {first}+{count} of {len}")))
 }
 
 fn bytes<'a>(v: &'a Value, k: &str) -> Result<&'a [u8]> {
@@ -653,10 +667,23 @@ fn read_skin_channels(
         )));
     }
     let at = |stream: usize, off: usize, row: usize, k: usize, size: usize| -> Result<&[u8]> {
-        let (base, stride) = stream_at[stream];
-        let from = base + row * stride + off + k * size;
-        data.get(from..from + size)
-            .ok_or_else(|| invalid(format!("{name}: blend data past the vertex data")))
+        let past = || {
+            invalid(format!(
+                "{name}: blend data past the vertex data ({} bytes)",
+                data.len()
+            ))
+        };
+        let &(base, stride) = stream_at.get(stream).ok_or_else(past)?;
+        let from = row
+            .checked_mul(stride)
+            .and_then(|r| {
+                r.checked_add(base)?
+                    .checked_add(off)?
+                    .checked_add(k.checked_mul(size)?)
+            })
+            .ok_or_else(past)?;
+        data.get(from..from.checked_add(size).ok_or_else(past)?)
+            .ok_or_else(past)
     };
     let index_size = component_size(ifmt)?;
     let mut weights = vec![[0.0f32; 4]; n];
@@ -676,6 +703,25 @@ fn read_skin_channels(
         }
     }
     Ok(Some((id, weights, bones)))
+}
+
+/// The submeshes of mesh `m` (`m_SubMeshes`), their stored numbers checked to fit the 32 bits they are kept in.
+fn read_submeshes(m: &Value, name: &str) -> Result<Vec<SubMesh>> {
+    let Some(Value::Array(Array::Values(list))) = m.get("m_SubMeshes") else {
+        return Err(invalid(format!("{name}: no m_SubMeshes")));
+    };
+    list.iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let what = format!("{name}: submesh {i}");
+            Ok(SubMesh {
+                first_byte: uint(s, "firstByte", &what)?,
+                index_count: uint(s, "indexCount", &what)?,
+                topology: int(s, "topology")?,
+                base_vertex: uint(s, "baseVertex", &what)?,
+            })
+        })
+        .collect()
 }
 
 impl UnityMeshData {
@@ -721,7 +767,7 @@ impl UnityMeshData {
             });
             let uv = get("m_UV")?;
             if items(uv)? > 0 {
-                let info = int(cm, "m_UVInfo")? as u32;
+                let info = uint(cm, "m_UVInfo", "compressed mesh")?;
                 if info == 0 {
                     return Err(Error::Unsupported("compressed mesh UVs without UV info".into()));
                 }
@@ -897,20 +943,7 @@ impl UnityMeshData {
                 .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect()
         };
-        let submeshes = match m.get("m_SubMeshes") {
-            Some(Value::Array(Array::Values(s))) => s
-                .iter()
-                .map(|s| {
-                    Ok(SubMesh {
-                        first_byte: int(s, "firstByte")? as u32,
-                        index_count: int(s, "indexCount")? as u32,
-                        topology: int(s, "topology")?,
-                        base_vertex: int(s, "baseVertex")? as u32,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?,
-            _ => return Err(invalid("mesh: no m_SubMeshes")),
-        };
+        let submeshes = read_submeshes(&m, &name)?;
         if variable.is_some() && compressed {
             return Err(Error::Unsupported(format!(
                 "{name}: compressed mesh with variable bone weights"
@@ -1172,5 +1205,125 @@ mod tests {
         assert_eq!(SkinWeights::from_setting(255).unwrap(), SkinWeights::Unlimited);
         assert_eq!(SkinWeights::from_setting(2).unwrap(), SkinWeights::Bones(2));
         assert!(SkinWeights::from_setting(3).is_err());
+    }
+
+    fn field(name: &str, v: Value) -> (std::sync::Arc<str>, Value) {
+        (name.into(), v)
+    }
+
+    fn list(items: Vec<Value>) -> Value {
+        Value::Array(Array::Values(items))
+    }
+
+    /// A `m_Shapes` of one channel of one frame of one vertex, with the stored numbers given.
+    fn shapes(first_vertex: i64, vertex_count: i64, frame_index: i64, name_hash: i64) -> Value {
+        let v3 = |x: f32| {
+            Value::Struct(vec![
+                field("x", Value::Float(x)),
+                field("y", Value::Float(0.0)),
+                field("z", Value::Float(0.0)),
+            ])
+        };
+        let m_shapes = Value::Struct(vec![
+            field(
+                "channels",
+                list(vec![Value::Struct(vec![
+                    field("name", Value::String("smile".into())),
+                    field("nameHash", Value::Int(name_hash)),
+                    field("frameIndex", Value::Int(frame_index)),
+                    field("frameCount", Value::Int(1)),
+                ])]),
+            ),
+            field("fullWeights", Value::Array(Array::F32(vec![100.0]))),
+            field(
+                "vertices",
+                list(vec![Value::Struct(vec![
+                    field("index", Value::Int(0)),
+                    field("vertex", v3(1.0)),
+                    field("normal", v3(0.0)),
+                    field("tangent", v3(0.0)),
+                ])]),
+            ),
+            field(
+                "shapes",
+                list(vec![Value::Struct(vec![
+                    field("firstVertex", Value::Int(first_vertex)),
+                    field("vertexCount", Value::Int(vertex_count)),
+                    field("hasNormals", Value::Bool(false)),
+                    field("hasTangents", Value::Bool(false)),
+                ])]),
+            ),
+        ]);
+        Value::Struct(vec![field("m_Shapes", m_shapes)])
+    }
+
+    /// Stored runs and hashes that overflow, are negative or do not fit 32 bits are refused where the old casts and
+    /// sums panicked or wrapped.
+    #[test]
+    fn blend_shape_numbers_are_checked_not_cast() {
+        let ok = read_shapes(&shapes(0, 1, 0, 0xdead_beef), "m", 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!((ok.channels[0].name_hash, ok.frames[0].count), (0xdead_beef, 1));
+        for (first, count, frame, hash, wants) in [
+            (i64::MAX, 1, 0, 0, "entries 9223372036854775807+1 of 1"),
+            (0, i64::MAX, 0, 0, "entries 0+9223372036854775807 of 1"),
+            (-1, 2, 0, 0, "entries -1+2 of 1"),
+            (0, 1, i64::MAX, 0, "entries 9223372036854775807+1 of 1"),
+            (0, 1, 0, 1 << 32, "nameHash 4294967296"),
+            (0, 1, 0, -1, "nameHash -1"),
+        ] {
+            let e = read_shapes(&shapes(first, count, frame, hash), "m", 1)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(wants), "{e}");
+        }
+    }
+
+    fn submesh(first_byte: i64, index_count: i64, base_vertex: i64) -> Value {
+        Value::Struct(vec![
+            field("firstByte", Value::Int(first_byte)),
+            field("indexCount", Value::Int(index_count)),
+            field("topology", Value::Int(0)),
+            field("baseVertex", Value::Int(base_vertex)),
+        ])
+    }
+
+    /// A submesh's numbers are 32-bit unsigned: a stored 2^32 + 6 is refused, not read as 6, and the error names the
+    /// submesh and the field.
+    #[test]
+    fn submesh_numbers_that_do_not_fit_are_refused_not_wrapped() {
+        let mesh = |subs| Value::Struct(vec![field("m_SubMeshes", list(subs))]);
+        let ok = read_submeshes(&mesh(vec![submesh(6, 3, 0)]), "m").unwrap();
+        assert_eq!((ok[0].first_byte, ok[0].index_count), (6, 3));
+        for (sub, wants) in [
+            (submesh((1 << 32) + 6, 3, 0), "firstByte 4294967302"),
+            (submesh(0, -1, 0), "indexCount -1"),
+            (submesh(0, 3, 1 << 33), "baseVertex 8589934592"),
+        ] {
+            let e = read_submeshes(&mesh(vec![submesh(0, 3, 0), sub]), "m")
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("submesh 1") && e.contains(wants), "{e}");
+        }
+    }
+
+    /// A channel offset near the top of `usize` is a read past the data, not an overflow.
+    #[test]
+    fn blend_offsets_that_overflow_are_refused() {
+        let data = [0u8; 32];
+        for offset in [usize::MAX, usize::MAX - 3] {
+            let info = blend_info((0, 0, 0, 0), (0, offset, 10, 1));
+            let e = read_skin_channels("m", &info, &[(0, 4)], &data, 2)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("past the vertex data (32 bytes)"), "{e}");
+        }
+    }
+
+    /// Five influences asked of the padded constructor are cut to the four a padded list holds.
+    #[test]
+    fn padded_blends_hold_at_most_four_influences() {
+        assert_eq!(Blend::from_padded(9, &[[0.25; 4]], &[[1; 4]]).bones, vec![1; 4]);
     }
 }
