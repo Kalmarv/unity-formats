@@ -80,12 +80,16 @@ pub struct Curve {
 
 impl Curve {
     /// The value at `t` and the slopes into and out of it: a key's own at its time, a segment's derivative inside it,
-    /// the end values held with no slope outside. A step segment holds its key's value.
+    /// the end values held with no slope outside. A step segment holds its key's value. A curve without keys is 0; a
+    /// `t` that is NaN has the value NaN.
     pub fn sample(&self, t: f32) -> (f32, f32, f32) {
         let k = &self.keys;
         let (Some(first), Some(last)) = (k.first(), k.last()) else {
             return (0.0, 0.0, 0.0);
         };
+        if t.is_nan() {
+            return (f32::NAN, 0.0, 0.0);
+        }
         if t <= first.time {
             return (
                 first.value,
@@ -161,6 +165,9 @@ pub struct ClipData {
     pub worst_continuity_error: f32,
 }
 
+/// Words a key takes in the streamed block: its curve index and four coefficients.
+const KEY_WORDS: usize = 5;
+
 fn int(v: &Value, k: &str) -> Result<i64> {
     v.get(k)
         .and_then(Value::as_i64)
@@ -189,41 +196,68 @@ fn floats(v: &Value, k: &str) -> Result<Vec<f32>> {
     }
 }
 
-/// The streamed block's curves: `curve_count` curves from the frames in `words`.
+/// The streamed block's curves: `curve_count` curves from the frames in `words`. Every curve stores at least its
+/// initial key, five words, so a count the data cannot hold is refused before anything is allocated for it.
 fn read_streamed(name: &str, words: &[u32], curve_count: usize) -> Result<(Vec<Curve>, f32)> {
     let bad = |why: String| invalid(format!("{name}: streamed clip: {why}"));
+    let most = words.len() / KEY_WORDS;
+    if curve_count > most {
+        return Err(bad(format!(
+            "{curve_count} curves, but {} bytes of frames hold at most {most} keys, and every curve has one",
+            words.len().saturating_mul(4)
+        )));
+    }
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     // each curve's entries: the time and the four coefficients of the cubic that starts there
     let mut entries: Vec<Vec<(f32, [f32; 4])>> = vec![Vec::new(); curve_count];
     let mut at = 0;
     let take = |at: &mut usize, n: usize| -> Result<&[u8]> {
-        let part = bytes
-            .get(*at..*at + n)
-            .ok_or_else(|| bad(format!("frames past the data at byte {at}", at = *at)))?;
+        let part = at
+            .checked_add(n)
+            .and_then(|end| bytes.get(*at..end))
+            .ok_or_else(|| {
+                bad(format!(
+                    "frames past the data at byte {at} of {}",
+                    bytes.len(),
+                    at = *at
+                ))
+            })?;
         *at += n;
         Ok(part)
     };
     let mut last_time = f32::NEG_INFINITY;
     let mut ended = false;
     while at < bytes.len() {
+        let frame_at = at;
         let time = f32::from_le_bytes(take(&mut at, 4)?.try_into().expect("4 bytes"));
         let count = i32::from_le_bytes(take(&mut at, 4)?.try_into().expect("4 bytes"));
         if time.is_nan() || time < last_time {
-            return Err(bad(format!("frame time {time} after {last_time}")));
+            return Err(bad(format!(
+                "frame time {time} after {last_time} (the frame at byte {frame_at}; times must not decrease)"
+            )));
         }
         last_time = time;
-        let count = usize::try_from(count).map_err(|_| bad(format!("{count} keys in a frame")))?;
+        let count = usize::try_from(count).map_err(|_| {
+            bad(format!(
+                "{count} keys in the frame at byte {frame_at} (at least 0)"
+            ))
+        })?;
         for _ in 0..count {
+            let key_at = at;
             let index = i32::from_le_bytes(take(&mut at, 4)?.try_into().expect("4 bytes"));
             let mut c = [0.0f32; 4];
             for x in &mut c {
                 *x = f32::from_le_bytes(take(&mut at, 4)?.try_into().expect("4 bytes"));
             }
-            let index = usize::try_from(index)
+            usize::try_from(index)
                 .ok()
-                .filter(|i| *i < curve_count)
-                .ok_or_else(|| bad(format!("a key of curve {index} of {curve_count}")))?;
-            entries[index].push((time, c));
+                .and_then(|i| entries.get_mut(i))
+                .ok_or_else(|| {
+                    bad(format!(
+                        "a key of curve {index} of {curve_count} at byte {key_at}"
+                    ))
+                })?
+                .push((time, c));
         }
         if time == f32::INFINITY {
             ended = true;
@@ -231,9 +265,10 @@ fn read_streamed(name: &str, words: &[u32], curve_count: usize) -> Result<(Vec<C
         }
     }
     if !ended || at != bytes.len() {
-        return Err(bad(
-            "the frames do not end with the +inf frame at the end of the data".into(),
-        ));
+        return Err(bad(format!(
+            "the frames do not end with the +inf frame at the end of the data (frames end at byte {at} of {})",
+            bytes.len()
+        )));
     }
     let mut worst = 0.0f32;
     let mut out = Vec::with_capacity(curve_count);
@@ -290,6 +325,57 @@ fn read_streamed(name: &str, words: &[u32], curve_count: usize) -> Result<(Vec<C
     Ok((out, worst))
 }
 
+/// The dense block's curves (`m_DenseClip`): frame `f` of curve `c` is `m_SampleArray[f * curves + c]`, at
+/// `m_BeginTime + f / m_SampleRate`. The sample array must hold exactly `frames * curves` values, and a block that
+/// states curves needs frames: a count nothing stored backs is refused before a curve is made for it.
+fn read_dense(name: &str, dense: &Value) -> Result<Vec<Curve>> {
+    let bad = |why: String| invalid(format!("{name}: dense clip: {why}"));
+    let dense_curves =
+        usize::try_from(int(dense, "m_CurveCount")?).map_err(|_| bad("a negative curve count".into()))?;
+    let frames =
+        usize::try_from(int(dense, "m_FrameCount")?).map_err(|_| bad("a negative frame count".into()))?;
+    let samples = floats(dense, "m_SampleArray")?;
+    if frames.checked_mul(dense_curves) != Some(samples.len()) {
+        return Err(bad(format!(
+            "{} samples for {frames} frames of {dense_curves} curves",
+            samples.len()
+        )));
+    }
+    if frames == 0 && dense_curves > 0 {
+        return Err(bad(format!("{dense_curves} curves of no frames")));
+    }
+    let (rate, begin) = (float(dense, "m_SampleRate")?, float(dense, "m_BeginTime")?);
+    if frames > 1 && !(rate.is_finite() && rate > 0.0) {
+        return Err(bad(format!(
+            "sample rate {rate} for {frames} frames (a positive rate is needed)"
+        )));
+    }
+    let times: Vec<f32> = (0..frames).map(|f| begin + f as f32 / rate).collect();
+    let mut curves = Vec::with_capacity(dense_curves);
+    for c in 0..dense_curves {
+        let values: Vec<f32> = samples.iter().skip(c).step_by(dense_curves).copied().collect();
+        let slope = |a: usize, b: usize| match (values.get(a..=b), times.get(a..=b)) {
+            (Some([v0, .., v1]), Some([t0, .., t1])) => (v1 - v0) / (t1 - t0),
+            _ => 0.0,
+        };
+        curves.push(Curve {
+            storage: Storage::Dense,
+            keys: values
+                .iter()
+                .zip(&times)
+                .enumerate()
+                .map(|(f, (&value, &time))| Key {
+                    time,
+                    value,
+                    in_slope: if f > 0 { slope(f - 1, f) } else { 0.0 },
+                    out_slope: if f + 1 < frames { slope(f, f + 1) } else { 0.0 },
+                })
+                .collect(),
+        });
+    }
+    Ok(curves)
+}
+
 impl ClipData {
     /// The clip object `r`. Legacy clips (`m_Legacy`, curves stored per kind) are not read.
     pub fn read(player: &Player, r: &ObjRef) -> Result<ClipData> {
@@ -334,35 +420,7 @@ impl ClipData {
         } else {
             read_streamed(&name, streamed_words, streamed_count)?
         };
-        // dense: frame f of curve c is sample[f * curves + c], at begin + f / rate
-        let dense_curves = usize::try_from(int(dense, "m_CurveCount")?)
-            .map_err(|_| invalid(format!("{name}: negative dense curve count")))?;
-        let frames = usize::try_from(int(dense, "m_FrameCount")?)
-            .map_err(|_| invalid(format!("{name}: negative frame count")))?;
-        let samples = floats(dense, "m_SampleArray")?;
-        if samples.len() != frames * dense_curves {
-            return Err(invalid(format!(
-                "{name}: dense clip: {} samples for {frames} frames of {dense_curves} curves",
-                samples.len()
-            )));
-        }
-        let (rate, begin) = (float(dense, "m_SampleRate")?, float(dense, "m_BeginTime")?);
-        for c in 0..dense_curves {
-            let values: Vec<f32> = (0..frames).map(|f| samples[f * dense_curves + c]).collect();
-            let times: Vec<f32> = (0..frames).map(|f| begin + f as f32 / rate).collect();
-            let slope = |a: usize, b: usize| (values[b] - values[a]) / (times[b] - times[a]);
-            curves.push(Curve {
-                storage: Storage::Dense,
-                keys: (0..frames)
-                    .map(|f| Key {
-                        time: times[f],
-                        value: values[f],
-                        in_slope: if f > 0 { slope(f - 1, f) } else { 0.0 },
-                        out_slope: if f + 1 < frames { slope(f, f + 1) } else { 0.0 },
-                    })
-                    .collect(),
-            });
-        }
+        curves.extend(read_dense(&name, dense)?);
         for v in floats(constant, "data")? {
             curves.push(Curve {
                 storage: Storage::Constant,
@@ -508,6 +566,67 @@ mod tests {
         back.extend(frame(0.5, &[]));
         back.extend(frame(f32::INFINITY, &[]));
         assert!(refused(&back, 1).contains("after"));
+    }
+
+    /// A curve count nothing in the data backs is refused before a vector is made for it, with the offset of the bad
+    /// bytes where there is one.
+    #[test]
+    fn a_streamed_curve_count_is_bounded_by_the_data() {
+        let mut words = frame(-f32::MAX, &[(0, [0.0, 0.0, 0.0, 4.0])]);
+        words.extend(frame(f32::INFINITY, &[]));
+        for n in [2, 1 << 40, usize::MAX] {
+            let e = read_streamed("t", &words, n).unwrap_err().to_string();
+            assert!(e.contains("hold at most 1 keys"), "{e}");
+        }
+        // a key naming curve 5 of 1, at the byte the key starts (the frame header takes 8)
+        let mut words = frame(-f32::MAX, &[(5, [0.0; 4])]);
+        words.extend(frame(f32::INFINITY, &[]));
+        let e = read_streamed("t", &words, 1).unwrap_err().to_string();
+        assert!(e.contains("curve 5 of 1 at byte 8"), "{e}");
+        let mut back = frame(1.0, &[]);
+        back.extend(frame(0.5, &[]));
+        let e = read_streamed("t", &back, 0).unwrap_err().to_string();
+        assert!(e.contains("byte 8"), "{e}");
+    }
+
+    fn dense(curves: i64, frames: i64, samples: Vec<f32>) -> Value {
+        let f = |k: &str, v: Value| (std::sync::Arc::<str>::from(k), v);
+        Value::Struct(vec![
+            f("m_CurveCount", Value::Int(curves)),
+            f("m_FrameCount", Value::Int(frames)),
+            f("m_SampleRate", Value::Float(2.0)),
+            f("m_BeginTime", Value::Float(0.0)),
+            f("m_SampleArray", Value::Array(Array::F32(samples))),
+        ])
+    }
+
+    /// The dense block's frame and curve counts are multiplied without overflow and must be backed by samples: a huge
+    /// count with no samples makes no curves.
+    #[test]
+    fn dense_counts_are_checked_against_the_samples() {
+        for (curves, frames) in [(i64::MAX, 3), (3, i64::MAX), (i64::MAX, i64::MAX), (1 << 40, 0)] {
+            let e = read_dense("t", &dense(curves, frames, vec![]))
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("dense clip"), "{e}");
+        }
+        let curves = read_dense("t", &dense(2, 2, vec![0.0, 10.0, 1.0, 20.0])).unwrap();
+        assert_eq!(curves.len(), 2);
+        assert_eq!(
+            curves[1].keys,
+            vec![key(0.0, 10.0, 0.0, 20.0), key(0.5, 20.0, 20.0, 0.0)]
+        );
+        assert_eq!(read_dense("t", &dense(0, 0, vec![])).unwrap(), vec![]);
+    }
+
+    /// A time that is not a number samples to NaN instead of indexing before the first key.
+    #[test]
+    fn sampling_at_nan_does_not_panic() {
+        let curve = Curve {
+            storage: Storage::Constant,
+            keys: vec![key(0.0, 1.0, 0.0, 0.0), key(1.0, 2.0, 0.0, 0.0)],
+        };
+        assert!(curve.sample(f32::NAN).0.is_nan());
     }
 
     /// A Hermite curve samples to its keys, and a transform track of three curves with different key times becomes
