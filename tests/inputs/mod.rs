@@ -16,14 +16,13 @@ primase_testdata::inputs! {
         },
     }
     keys {}
-    tools {
-        UnityTpk = "unity_tpk" {
-            about: "a type tree package (TPK, uncompressed or LZ4) with the class layouts for the Unity players read",
-            source: "input data: class layouts for the player's Unity version (repacked with a script kept with the private oracle tools)",
-            gate: true,
+    tools {}
+    oracle_sets {
+        UnityPy = "unitypy" {
+            about: "UnityPy's readings of a Unity player (object tables, samples, meshes, textures, materials, shaders, frames, listings)",
+            source: "independent: UnityPy, through dump scripts kept with the private oracle tools",
         },
     }
-    oracle_sets {}
     declared {
         Query::Install(Game::Skatebird, Some("SkateBIRD_Data")) => {
             status: Live,
@@ -31,9 +30,12 @@ primase_testdata::inputs! {
             about: r#"SkateBIRD's data folder (`SkateBIRD_Data`, a Unity 2019.4.20f1 player: SerializedFile version 21 containers), read with `tools.unity_tpk`; `worlds/unity/tests/serialized_census.rs`, `worlds/skatebird/tests/markers.rs`"#,
             source: r#"the user's own install"#,
         },
+        Query::Oracle(OracleSet::UnityPy, Game::Skatebird, "census.json") => {
+            status: Live,
+            gate: true,
+            about: r#"an independent UnityPy object-table census of that folder (JSON; schema in `worlds/unity/tests/serialized_census.rs`)"#,
+            source: r#"independent: UnityPy, through dump scripts kept with the private oracle tools"#,
+        },
     }
-    debug {
-        "skatebird.voronoi_digest" => "the digest the Voronoi bake test's maps must have",
-        "skatebird.voronoi_level" => "the SkateBIRD level the Voronoi bake test bakes (default `level1`)",
-    }
+    debug {}
 }
