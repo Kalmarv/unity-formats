@@ -168,6 +168,31 @@ impl SerializedFile {
         }
     }
 
+    /// The container version of `bytes` when they are a SerializedFile of any version, supported or not: a supported
+    /// version by its field alone (a damaged file of it is for [`SerializedFile::parse`] to refuse), another version
+    /// only when the header's own size fields agree with `bytes.len()`, so that other files (streamed resources,
+    /// configs) are not taken for one. `None` for bytes that are no SerializedFile.
+    pub fn container_version(bytes: &[u8]) -> Option<u32> {
+        let be =
+            |at: usize| -> Option<u32> { Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?)) };
+        let len = u64::try_from(bytes.len()).ok()?;
+        let version = be(8)?;
+        if VERSIONS.contains(&version) {
+            return Some(version);
+        }
+        let consistent = if version < *VERSIONS.start() {
+            // the legacy header: metadata size, file size, version, data offset
+            version > 0 && u64::from(be(4)?) == len && u64::from(be(12)?) <= len
+        } else {
+            // the header of 22 and later: the legacy fields are zero, the file size follows the metadata size
+            be(0)? == 0
+                && be(4)? == 0
+                && be(12)? == 0
+                && u64::from_be_bytes(bytes.get(24..32)?.try_into().ok()?) == len
+        };
+        consistent.then_some(version)
+    }
+
     /// Parse the SerializedFile `data`. The header's sizes must match `data`, the object table must lie inside it and
     /// the metadata must end exactly where the header says; a version outside [`VERSIONS`], a file with embedded type
     /// trees, a duplicate path id and every length that runs past the bytes are refused with an [`Error`] that names

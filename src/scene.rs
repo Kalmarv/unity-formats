@@ -333,6 +333,27 @@ pub struct Scene {
 /// The chains of parents are at most [`MAX_DEPTH`] long (a loop is a chain that does not end): a path, a world matrix
 /// and the off flags are walked up the chain for each node, so a chain of d transforms costs d^2 of them and d paths
 /// of d names.
+/// A GameObject's `m_Layer`: 0 when it states none; a stored value outside 32 bits unsigned is refused.
+fn layer_of(g: &Value) -> Result<u32> {
+    let layer = g.get("m_Layer").and_then(Value::as_i64).unwrap_or(0);
+    u32::try_from(layer).map_err(|_| invalid(format!("m_Layer {layer} is not a 32-bit unsigned number")))
+}
+
+/// A component's `m_CullingMask.m_Bits`: every layer when it states none. The 32 bits may be stored unsigned or as a
+/// signed `int` (-1 is every layer); a number that fits neither is refused, not wrapped.
+fn culling_mask(c: &Value, path_id: i64) -> Result<u32> {
+    match c.at(&["m_CullingMask", "m_Bits"]).and_then(Value::as_i64) {
+        None => Ok(u32::MAX),
+        Some(bits) => u32::try_from(bits)
+            .or_else(|_| i32::try_from(bits).map(|signed| u32::from_ne_bytes(signed.to_ne_bytes())))
+            .map_err(|_| {
+                invalid(format!(
+                    "object {path_id}: m_CullingMask {bits} does not fit 32 bits"
+                ))
+            }),
+    }
+}
+
 fn check_depth(nodes: &BTreeMap<i64, Node>) -> Result<()> {
     let mut depths: BTreeMap<i64, usize> = BTreeMap::new();
     for &start in nodes.keys() {
@@ -413,7 +434,7 @@ impl Scene {
                         GameObject {
                             name: g.get("m_Name").and_then(Value::as_str).unwrap_or("").to_owned(),
                             active: flag(&g, "m_IsActive")?,
-                            layer: g.get("m_Layer").and_then(Value::as_i64).unwrap_or(0) as u32,
+                            layer: layer_of(&g)?,
                             components,
                         },
                     );
@@ -545,12 +566,30 @@ impl Scene {
         Ok(out)
     }
 
+    /// The world matrices computed so far. A thread that panicked holding the lock can leave nothing half-written (an
+    /// entry is inserted whole), so a poisoned lock is still a valid cache.
+    fn world_cache(&self) -> std::sync::MutexGuard<'_, BTreeMap<i64, Matrix>> {
+        self.world
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The Transform of the GameObject `root` that a query is limited to; `None` for a query of the whole file. A
+    /// GameObject without a Transform is an error, not an empty or an unlimited query.
+    fn root_transform(&self, root: Option<i64>) -> Result<Option<i64>> {
+        root.map(|go| {
+            self.transform_of(go)
+                .ok_or_else(|| invalid(format!("GameObject {go} has no transform")))
+        })
+        .transpose()
+    }
+
     /// A Transform's world matrix (Unity frame).
     pub fn world_of(&self, tp: i64) -> Result<Matrix> {
         let mut chain = Vec::new();
         let mut t = tp;
         let base = loop {
-            if let Some(m) = self.world.lock().expect("world cache").get(&t) {
+            if let Some(m) = self.world_cache().get(&t) {
                 break *m;
             }
             let Some(n) = self.nodes.get(&t) else {
@@ -566,7 +605,7 @@ impl Scene {
             t = n.father;
         };
         let mut m = base;
-        let mut cache = self.world.lock().expect("world cache");
+        let mut cache = self.world_cache();
         for &t in chain.iter().rev() {
             m = mul(&m, &self.nodes[&t].local);
             cache.insert(t, m);
@@ -737,13 +776,7 @@ impl Scene {
 
     /// The Animators on the GameObject `root` and its descendants (a prefab's), all of the file's with `None`.
     pub fn animators_under(&self, player: &Player, root: Option<i64>) -> Result<Vec<Animator>> {
-        let root_tp = match root {
-            Some(go) => Some(
-                self.transform_of(go)
-                    .ok_or_else(|| invalid(format!("GameObject {go} has no transform")))?,
-            ),
-            None => None,
-        };
+        let root_tp = self.root_transform(root)?;
         let file = self.file.as_str();
         let r = |pid: i64| ObjRef {
             file: file.to_owned(),
@@ -816,13 +849,13 @@ impl Scene {
     /// The LODGroups of the GameObject `root` and its descendants (a prefab's), all of the file's with `None`, in the
     /// order of the object table.
     pub fn lod_groups_under(&self, player: &Player, root: Option<i64>) -> Result<Vec<LodGroup>> {
+        let root_tp = self.root_transform(root)?;
         let file = self.file.as_str();
         let f = player.file(file)?;
         let r = |pid: i64| ObjRef {
             file: file.to_owned(),
             path_id: pid,
         };
-        let root_tp = root.and_then(|go| self.transform_of(go));
         let mut out = Vec::new();
         for o in f
             .objects
@@ -862,13 +895,7 @@ impl Scene {
     /// The mesh renderers of the GameObject `root` and its descendants (a prefab's), their matrices relative to
     /// `root`; all of the file's with `None`.
     pub fn renderers_under(&self, player: &Player, root: Option<i64>) -> Result<(Vec<Renderer>, Skipped)> {
-        let root_tp = match root {
-            Some(go) => Some(
-                self.transform_of(go)
-                    .ok_or_else(|| invalid(format!("GameObject {go} has no transform")))?,
-            ),
-            None => None,
-        };
+        let root_tp = self.root_transform(root)?;
         let file = self.file.as_str();
         let f = player.file(file)?;
         let r = |pid: i64| ObjRef {
@@ -931,7 +958,16 @@ impl Scene {
                 .and_then(|s| s.get("subMeshCount"))
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
-            let submeshes = (count > 0).then_some((first as u32, count as u32));
+            let submeshes = if count > 0 {
+                let to_u32 = |n: i64, k: &str| {
+                    u32::try_from(n).map_err(|_| {
+                        invalid(format!("renderer {}: {k} {n} is not 32-bit unsigned", o.path_id))
+                    })
+                };
+                Some((to_u32(first, "firstSubMesh")?, to_u32(count, "subMeshCount")?))
+            } else {
+                None
+            };
             let skin = if skinned {
                 let bone = |p: &Value| -> Result<Option<i64>> {
                     let pid = p
@@ -1024,13 +1060,7 @@ impl Scene {
             file: file.to_owned(),
             path_id: pid,
         };
-        let root_tp = match root {
-            Some(go) => Some(
-                self.transform_of(go)
-                    .ok_or_else(|| invalid(format!("GameObject {go} has no transform")))?,
-            ),
-            None => None,
-        };
+        let root_tp = self.root_transform(root)?;
         let v3 = |v: &Value, k: &str| -> Result<[f64; 3]> { vec3(v, k) };
         let mut out = Vec::new();
         for o in &f.objects {
@@ -1065,7 +1095,15 @@ impl Scene {
                     center: v3(&c, "m_Center")?,
                     radius: fl("m_Radius")?,
                     height: fl("m_Height")?,
-                    direction: c.get("m_Direction").and_then(Value::as_i64).unwrap_or(1) as usize,
+                    direction: match c.get("m_Direction").and_then(Value::as_i64).unwrap_or(1) {
+                        d @ 0..=2 => d as usize,
+                        d => {
+                            return Err(invalid(format!(
+                                "CapsuleCollider {}: m_Direction {d} is not 0, 1 or 2",
+                                o.path_id
+                            )));
+                        }
+                    },
                 },
                 _ => ColliderShape::Mesh {
                     mesh: match c.get("m_Mesh") {
@@ -1232,10 +1270,7 @@ impl Scene {
                     && l.at(&["m_BakingOutput", "lightmapBakeMode", "lightmapBakeType"])
                         .and_then(Value::as_i64)
                         == Some(2),
-                culling_mask: l
-                    .at(&["m_CullingMask", "m_Bits"])
-                    .and_then(Value::as_i64)
-                    .unwrap_or(-1) as u32,
+                culling_mask: culling_mask(&l, o.path_id)?,
                 cookie: match l.get("m_Cookie") {
                     Some(p) => player.resolve(file, p)?,
                     None => None,
@@ -1265,10 +1300,7 @@ impl Scene {
                 camera: r(o.path_id),
                 path: self.path(tp),
                 world: self.world_of(tp)?,
-                culling_mask: c
-                    .at(&["m_CullingMask", "m_Bits"])
-                    .and_then(Value::as_i64)
-                    .unwrap_or(-1) as u32,
+                culling_mask: culling_mask(&c, o.path_id)?,
                 target_texture: match c.get("m_TargetTexture") {
                     Some(p) => player.resolve(file, p)?,
                     None => None,
@@ -1279,8 +1311,9 @@ impl Scene {
         Ok(out)
     }
 
-    /// The terrains, whatever their state, in the order of the scene's object table.
-    pub fn terrains(&self, player: &Player) -> Result<Vec<TerrainComponent>> {
+    /// The terrains, whatever their state, in the order of the scene's object table, and what was skipped (no transform,
+    /// no terrain data: a Terrain that names no TerrainData draws nothing).
+    pub fn terrains(&self, player: &Player) -> Result<(Vec<TerrainComponent>, Skipped)> {
         let file = self.file.as_str();
         let f = player.file(file)?;
         let r = |pid: i64| ObjRef {
@@ -1289,10 +1322,14 @@ impl Scene {
         };
         let class = |pid: i64| player.class_name(&r(pid)).unwrap_or("");
         let mut out = Vec::new();
+        let mut skipped = Skipped::new();
         for o in f.objects.iter().filter(|o| class(o.path_id) == "Terrain") {
             let t = player.decode(&r(o.path_id))?;
             let go = path_id(&t, "m_GameObject")?;
-            let Some(tp) = self.transform_of(go) else { continue };
+            let Some(tp) = self.transform_of(go) else {
+                *skipped.entry("no transform").or_default() += 1;
+                continue;
+            };
             let off = self.off_flags(tp, Some((o.path_id, flag(&t, "m_Enabled")?)));
             let pptr = |v: &Value, k: &str| -> Result<Option<ObjRef>> {
                 match v.get(k) {
@@ -1301,6 +1338,7 @@ impl Scene {
                 }
             };
             let Some(data) = pptr(&t, "m_TerrainData")? else {
+                *skipped.entry("no terrain data").or_default() += 1;
                 continue;
             };
             let collider = match self.game_objects[&go]
@@ -1332,7 +1370,7 @@ impl Scene {
                 off,
             });
         }
-        Ok(out)
+        Ok((out, skipped))
     }
 }
 
@@ -1523,5 +1561,61 @@ mod tests {
         let mut orphan = chain(3);
         orphan.get_mut(&1).unwrap().father = 99;
         assert!(check_depth(&orphan).is_ok());
+    }
+
+    fn scene_of(nodes: BTreeMap<i64, Node>) -> Scene {
+        Scene {
+            file: "level0".into(),
+            game_objects: BTreeMap::new(),
+            transform_of: nodes.iter().map(|(&tp, n)| (n.game_object, tp)).collect(),
+            nodes,
+            world: std::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// A query limited to a GameObject without a Transform is an error for every query that takes a root, the LODGroup
+    /// query among them, not an unlimited one.
+    #[test]
+    fn a_root_without_a_transform_is_refused() {
+        let scene = scene_of(chain(2));
+        assert_eq!(scene.root_transform(None).unwrap(), None);
+        assert_eq!(scene.root_transform(Some(2)).unwrap(), Some(2));
+        let e = scene.root_transform(Some(77)).unwrap_err().to_string();
+        assert!(e.contains("GameObject 77 has no transform"), "{e}");
+    }
+
+    /// A panic while the world cache was locked leaves a usable cache, not a panic in every later call.
+    #[test]
+    fn a_poisoned_world_cache_is_still_read() {
+        let scene = std::sync::Arc::new(scene_of(chain(3)));
+        let held = scene.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = held.world.lock().unwrap();
+            panic!("poison the cache");
+        })
+        .join();
+        assert!(scene.world.is_poisoned());
+        assert_eq!(scene.world_of(3).unwrap(), IDENTITY);
+    }
+
+    fn with(k: &str, v: Value) -> Value {
+        Value::Struct(vec![(k.into(), v)])
+    }
+
+    /// Layers and culling masks outside 32 bits are refused, not wrapped to another layer set.
+    #[test]
+    fn layers_and_masks_are_not_cast() {
+        assert_eq!(layer_of(&with("m_Layer", Value::Int(5))).unwrap(), 5);
+        assert_eq!(layer_of(&Value::Struct(vec![])).unwrap(), 0);
+        for bad in [-1, 1 << 32] {
+            assert!(layer_of(&with("m_Layer", Value::Int(bad))).is_err());
+        }
+        let mask = |bits| culling_mask(&with("m_CullingMask", with("m_Bits", Value::Int(bits))), 9);
+        assert_eq!(mask(0xffff_fff0).unwrap(), 0xffff_fff0);
+        assert_eq!(mask(-1).unwrap(), u32::MAX);
+        assert_eq!(culling_mask(&Value::Struct(vec![]), 9).unwrap(), u32::MAX);
+        let e = mask(1 << 32).unwrap_err().to_string();
+        assert!(e.contains("object 9") && e.contains("4294967296"), "{e}");
+        assert!(mask(-(1 << 40)).is_err());
     }
 }

@@ -129,9 +129,14 @@ fn file_key(path: &str) -> String {
 impl Player {
     /// The serialized files of `dir` (the `<Game>_Data` folder) and of its `Resources` folder, read with `package`'s
     /// class layouts. Files of other kinds (resources, bundles, configs) are skipped.
+    ///
+    /// A file whose header is a SerializedFile's of a version this crate does not read is refused, not left out: a
+    /// player with such a file would otherwise read as one without it. Two files the player would name alike (they
+    /// differ by case, or one is in the data folder and one in `Resources`) are refused too.
     pub fn open(dir: &Path, package: TypeTreePackage) -> Result<Self> {
         let mut files = BTreeMap::new();
         let mut folders = BTreeMap::new();
+        let mut paths_of: BTreeMap<String, PathBuf> = BTreeMap::new();
         for d in [dir.to_path_buf(), dir.join("Resources")] {
             let Ok(rd) = std::fs::read_dir(&d) else { continue };
             let mut paths: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
@@ -141,13 +146,29 @@ impl Player {
                     path: p.clone(),
                     source,
                 })?;
-                if !SerializedFile::looks_like(&bytes) {
-                    continue;
+                match SerializedFile::container_version(&bytes) {
+                    None => continue,
+                    Some(v) if !crate::serialized::VERSIONS.contains(&v) => {
+                        return Err(Error::Unsupported(format!(
+                            "{}: SerializedFile version {v} (read: {}..={})",
+                            p.display(),
+                            crate::serialized::VERSIONS.start(),
+                            crate::serialized::VERSIONS.end()
+                        )));
+                    }
+                    Some(_) => {}
                 }
                 let name = p
                     .file_name()
                     .map(|n| n.to_string_lossy().to_lowercase())
                     .unwrap_or_default();
+                if let Some(first) = paths_of.insert(name.clone(), p.clone()) {
+                    return Err(invalid(format!(
+                        "{} and {} are both the player's file {name:?}",
+                        first.display(),
+                        p.display()
+                    )));
+                }
                 let f = SerializedFile::parse(bytes).map_err(|e| invalid(format!("{}: {e}", p.display())))?;
                 folders.insert(name.clone(), d.clone());
                 files.insert(name, f);
@@ -182,7 +203,11 @@ impl Player {
 
     fn tree(&self, file: &str, f: &SerializedFile, class_id: i32) -> Result<std::sync::Arc<TypeTree>> {
         let key = (f.unity_version.clone(), class_id);
-        let mut cache = self.trees.lock().expect("type tree cache");
+        // an entry is inserted whole, so a cache left by a thread that panicked is still valid
+        let mut cache = self
+            .trees
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(t) = cache.get(&key) {
             return Ok(t.clone());
         }
@@ -287,7 +312,20 @@ impl Player {
         }
         let d = f.decode_with(o, &*self.tree(&r.file, f, o.class_id)?)?;
         let bytes = f.bytes(o);
-        Ok((d.value, bytes[bytes.len() - d.rest..].to_vec()))
+        let script = bytes
+            .len()
+            .checked_sub(d.rest)
+            .and_then(|from| bytes.get(from..))
+            .ok_or_else(|| {
+                invalid(format!(
+                    "{}/{}: {} bytes left of {}",
+                    r.file,
+                    r.path_id,
+                    d.rest,
+                    bytes.len()
+                ))
+            })?;
+        Ok((d.value, script.to_vec()))
     }
 
     /// The pipeline asset each quality level draws with, each with the level's name: its own (`customRenderPipeline`),
@@ -603,5 +641,75 @@ mod tests {
         }
         assert!(name(Value::String("2".into())).is_err());
         assert!(current_level(&settings(Some(Value::Int(0))), &[]).is_err());
+    }
+
+    /// A SerializedFile of `version` with no objects, laid out as tests/serialized_headers.rs lays them out: 21 keeps
+    /// its sizes in the 20 byte header, later ones in the 48 byte header.
+    fn empty_file(version: u32) -> Vec<u8> {
+        let mut metadata = b"2019.4.20f1\0".to_vec();
+        metadata.extend_from_slice(&19_i32.to_le_bytes());
+        metadata.push(0);
+        // no types, objects, scripts, externals or reference types
+        metadata.extend_from_slice(&[0; 20]);
+        metadata.push(0);
+        let header = if version < 22 { 20 } else { 48 };
+        let size = header + metadata.len();
+        let mut out = vec![0; header];
+        out[8..12].copy_from_slice(&version.to_be_bytes());
+        if version < 22 {
+            out[0..4].copy_from_slice(&(metadata.len() as u32).to_be_bytes());
+            out[4..8].copy_from_slice(&(size as u32).to_be_bytes());
+            out[12..16].copy_from_slice(&(size as u32).to_be_bytes());
+        } else {
+            out[20..24].copy_from_slice(&(metadata.len() as u32).to_be_bytes());
+            out[24..32].copy_from_slice(&(size as u64).to_be_bytes());
+            out[32..40].copy_from_slice(&(size as u64).to_be_bytes());
+        }
+        out.extend(metadata);
+        out
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("unity-formats-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Resources")).unwrap();
+        dir
+    }
+
+    /// A file of a container version the crate does not read is refused with its path and version, not left out of the
+    /// player; files that are no SerializedFile are still skipped.
+    #[test]
+    fn a_file_of_an_unread_version_is_refused_not_absent() {
+        for version in [20, 23] {
+            let dir = scratch(&format!("version{version}"));
+            std::fs::write(dir.join("level0"), empty_file(21)).unwrap();
+            std::fs::write(dir.join("sharedassets0.assets.resS"), [7u8; 100]).unwrap();
+            assert_eq!(
+                Player::open(&dir, TypeTreePackage::empty()).unwrap().files.len(),
+                1
+            );
+            std::fs::write(dir.join("level1"), empty_file(version)).unwrap();
+            let e = Player::open(&dir, TypeTreePackage::empty()).unwrap_err();
+            assert!(matches!(e, Error::Unsupported(_)), "{e}");
+            let e = e.to_string();
+            assert!(
+                e.contains("level1") && e.contains(&format!("version {version}")),
+                "{e}"
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// Two files the player names alike are refused, naming both, instead of the later replacing the earlier.
+    #[test]
+    fn two_files_with_one_name_are_refused() {
+        let dir = scratch("duplicate");
+        std::fs::write(dir.join("resources.assets"), empty_file(21)).unwrap();
+        std::fs::write(dir.join("Resources").join("Resources.assets"), empty_file(22)).unwrap();
+        let e = Player::open(&dir, TypeTreePackage::empty())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("both the player's file \"resources.assets\""), "{e}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

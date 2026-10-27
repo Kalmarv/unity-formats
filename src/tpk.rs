@@ -41,6 +41,18 @@ pub struct TypeTreePackage {
     strings: Vec<Arc<str>>,
 }
 
+#[cfg(test)]
+impl TypeTreePackage {
+    /// A package without classes, for tests that need a package but decode no object.
+    pub(crate) fn empty() -> Self {
+        TypeTreePackage {
+            classes: BTreeMap::new(),
+            nodes: Vec::new(),
+            strings: Vec::new(),
+        }
+    }
+}
+
 fn varint_string(r: &mut Reader) -> Result<Arc<str>> {
     let (mut len, mut shift) = (0usize, 0u32);
     loop {
