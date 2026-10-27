@@ -28,6 +28,7 @@ pub struct GenericBinding {
     pub attribute: u32,
     /// The target's class id (4 Transform, 95 Animator, 137 SkinnedMeshRenderer, ...).
     pub type_id: i64,
+    /// Whether the curve drives an object reference (`isPPtrCurve`); such clips are refused by [`ClipData::read`].
     pub is_pptr: bool,
 }
 
@@ -45,8 +46,11 @@ impl GenericBinding {
 /// Where a curve was stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Storage {
+    /// The streamed block (`m_StreamedClip`).
     Streamed,
+    /// The dense block (`m_DenseClip`).
     Dense,
+    /// The constant block (`m_ConstantClip`).
     Constant,
 }
 
@@ -54,9 +58,13 @@ pub enum Storage {
 /// slope is a step to the next key.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Key {
+    /// Seconds from the clip's start.
     pub time: f32,
+    /// The curve's value at `time`.
     pub value: f32,
+    /// The slope arriving at the key, per second.
     pub in_slope: f32,
+    /// The slope leaving the key, per second; infinite for a step.
     pub out_slope: f32,
 }
 
@@ -64,7 +72,9 @@ pub struct Key {
 /// are its secants, so it is piecewise linear).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Curve {
+    /// Which block the curve was stored in.
     pub storage: Storage,
+    /// The keys, in increasing time.
     pub keys: Vec<Key>,
 }
 
@@ -118,6 +128,7 @@ impl Curve {
         self.keys.iter().any(|k| !k.out_slope.is_finite())
     }
 
+    /// Whether the curve has a single key.
     pub fn is_constant(&self) -> bool {
         self.keys.len() == 1
     }
@@ -126,17 +137,22 @@ impl Curve {
 /// A binding with the curves it takes, in the order of its attribute's components.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Track {
+    /// What the curves drive.
     pub binding: GenericBinding,
+    /// [`GenericBinding::width`] curves.
     pub curves: Vec<Curve>,
 }
 
 /// An AnimationClip's curves as stored.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipData {
+    /// `m_Name`.
     pub name: String,
     /// Seconds, `m_StopTime - m_StartTime`.
     pub duration: f32,
+    /// `m_LoopTime`.
     pub looping: bool,
+    /// The bindings with their curves, in binding order.
     pub tracks: Vec<Track>,
     /// Animation events (`m_Events`): not read.
     pub events: usize,

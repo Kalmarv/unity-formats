@@ -1,7 +1,31 @@
-//! Readers for the data files of Unity players.
+//! Readers for the data files of Unity players: the SerializedFiles a built game keeps its scenes and assets in, and
+//! the objects inside them (scenes, meshes, textures, materials, shader programs, terrains, Animator data).
 //!
 //! A built Unity game keeps its scenes and assets in *SerializedFiles* (`globalgamemanagers`, `*.assets`, `levelN`),
-//! with the bulk data (textures, meshes, audio) in `.resS` stream files beside them. The modules:
+//! with the bulk data (textures, meshes, audio) in `.resS` stream files beside them. A player build strips the type
+//! trees that say how each class is laid out, so objects are decoded with a *type tree package* (a TPK file) that the
+//! caller supplies. The crate was written against Unity 2019.4 and Unity 6 players (SkateBIRD, Sledding Game, PEAK);
+//! what it refuses to read is named in each module.
+//!
+//! ```no_run
+//! use std::path::Path;
+//! use unity_formats::{TypeTreePackage, listing::list, mesh::UnityMeshData, player::Player};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let package = TypeTreePackage::parse(&std::fs::read("typetrees.tpk")?)?;
+//! let player = Player::open(Path::new("Game_Data"), package)?;
+//! for scene in player.scenes()? {
+//!     println!("{}: {}", scene.file, scene.name);
+//! }
+//! for entry in list(&player, Some(&["Mesh"]))?.entries.iter().take(3) {
+//!     let mesh = UnityMeshData::read(&player, &entry.object)?;
+//!     println!("{}: {} vertices", mesh.name, mesh.vertex_count);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The modules:
 //!
 //! - [`serialized`]: the SerializedFile container: header, types, the object table, script references, external
 //!   files. Strict and version-gated: only container versions verified against real data are read.
@@ -14,7 +38,7 @@
 //! - [`player`]: a player's data folder: its files, pointers resolved across them, its quality levels, its build's
 //!   scene list and render pipeline.
 //! - [`scene`]: a scene's hierarchy (GameObjects, Transforms composed to world matrices) and its renderers, lights,
-//!   colliders and terrains, with the scene's ambient and fog settings.
+//!   cameras, colliders and terrains, with the scene's ambient and fog settings.
 //! - [`mesh`]: meshes (vertex streams, compressed meshes, index buffers, submeshes, skins and blend shapes).
 //! - [`texture`]: textures (formats, mip chains, sampler state).
 //! - [`program`]: a shader's compiled programs (variants, constant-buffer layouts, bind slots, code).
@@ -26,8 +50,8 @@
 //! - [`terrain`]: terrains as stored (heightmap, holes, splat layers and alphamaps, trees).
 //! - [`pipeline`]: the lighting and shadow settings of a Universal Render Pipeline asset.
 //!
-//! Every read is bounds-checked, and a file the reader does not understand is refused with an [`Error`] that names
-//! what it found and where.
+//! Reads are bounds-checked, and a file the readers do not understand is refused with an [`Error`] that names what
+//! was found and where.
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 pub mod animator;
@@ -55,6 +79,11 @@ pub use tpk::TypeTreePackage;
 pub use typetree::TypeTree;
 pub use value::Value;
 pub use version::UnityVersion;
+
+/// The README's code blocks, compiled as doc tests so they cannot drift from the API.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
 
 /// Why a read was refused.
 #[derive(Debug, thiserror::Error)]

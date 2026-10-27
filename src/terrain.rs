@@ -53,46 +53,71 @@ pub fn check_heightmap(
 /// and its prototype's index.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TreeInstance {
+    /// Position as 0 to 1 of the terrain's size along each axis.
     pub position: [f32; 3],
+    /// `widthScale`.
     pub width_scale: f32,
+    /// `heightScale`.
     pub height_scale: f32,
+    /// Rotation about the y axis, in radians.
     pub rotation: f32,
+    /// The tint, packed as stored (`color.rgba`).
     pub color: u32,
+    /// Index into [`TerrainData::tree_prototypes`].
     pub prototype: usize,
 }
 
 /// A `TerrainData` as stored.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TerrainData {
+    /// `m_Name`.
     pub name: String,
+    /// Samples along each side of the heightmap.
     pub resolution: u32,
+    /// Metres between samples along x, the height in metres along y, metres between samples along z (`m_Scale`).
     pub scale: [f32; 3],
+    /// The height samples, row `z` then column `x`, each 0 to [`MAX_HEIGHT`].
     pub heights: Vec<i16>,
     /// One byte per cell, 0 a hole; `None` when none are stored.
     pub holes: Option<Vec<u8>>,
+    /// The splat layers (`m_TerrainLayers`), read with [`TerrainLayerData::read`]; `None` for a null pointer.
     pub layers: Vec<Option<ObjRef>>,
+    /// The splat weight textures (`m_AlphaTextures`), four layers' weights each as RGBA.
     pub alphamaps: Vec<Option<ObjRef>>,
+    /// `m_AlphamapResolution`: the side of an alphamap in texels.
     pub alphamap_resolution: u32,
     /// Each tree prototype's prefab.
     pub tree_prototypes: Vec<Option<ObjRef>>,
+    /// The tree instances.
     pub trees: Vec<TreeInstance>,
 }
 
 /// A `TerrainLayer` as stored.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TerrainLayerData {
+    /// `m_Name`.
     pub name: String,
+    /// The diffuse texture.
     pub diffuse: Option<ObjRef>,
+    /// The normal map.
     pub normal: Option<ObjRef>,
+    /// The mask map.
     pub mask: Option<ObjRef>,
+    /// `m_TileSize`: how many metres one repeat covers.
     pub tile_size: [f32; 2],
+    /// `m_TileOffset`.
     pub tile_offset: [f32; 2],
+    /// `m_Specular`, RGBA.
     pub specular: [f32; 4],
+    /// `m_Metallic`.
     pub metallic: f32,
+    /// `m_Smoothness`.
     pub smoothness: f32,
+    /// `m_NormalScale`.
     pub normal_scale: f32,
     /// Min and max, RGBA.
     pub diffuse_remap: [[f32; 4]; 2],
+    /// `m_MaskMapRemapMin` and `m_MaskMapRemapMax`: min and max, RGBA.
     pub mask_remap: [[f32; 4]; 2],
 }
 

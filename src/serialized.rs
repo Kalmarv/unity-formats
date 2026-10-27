@@ -27,39 +27,55 @@ pub const VERSIONS: std::ops::RangeInclusive<u32> = 21..=22;
 /// The MonoBehaviour class: its type tree covers the base fields; the script's own fields follow.
 pub const MONO_BEHAVIOUR: i32 = 114;
 
+/// One entry of a file's type table: the class the objects of this type are of, as the file declares it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SerializedType {
+    /// Unity's class id (1 GameObject, 4 Transform, 114 MonoBehaviour, ...).
     pub class_id: i32,
+    /// Whether the build stripped the class's type tree.
     pub stripped: bool,
     /// Index into the script references (-1: none).
     pub script_type_index: i16,
+    /// The script's 16-byte hash: present for a MonoBehaviour type, and for a reference type whose script index is
+    /// not -1.
     pub script_id: Option<[u8; 16]>,
+    /// The 16-byte hash the file stores for the class's layout.
     pub old_type_hash: [u8; 16],
 }
 
 /// One entry of the object table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObjectInfo {
+    /// The object's id within its file; unique per file.
     pub path_id: i64,
     /// The object's bytes: offset in the file and size.
     pub offset: u64,
+    /// The object's size in bytes.
     pub size: u32,
+    /// Index into [`SerializedFile::types`].
     pub type_index: u32,
+    /// The class id of the object's type.
     pub class_id: i32,
 }
 
 /// Another file this one's pointers can name (file id = index + 1).
 #[derive(Clone, Debug, PartialEq)]
 pub struct External {
+    /// The external file's 16-byte GUID as stored.
     pub guid: [u8; 16],
+    /// The file's kind as stored (`type`).
     pub kind: i32,
+    /// The external file's path as stored; [`crate::player::Player::resolve`] names the file by its last path segment,
+    /// lower-cased.
     pub path: String,
 }
 
 /// A decoded object: its value, and the bytes after what its type tree covers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Decoded {
+    /// The decoded object.
     pub value: Value,
+    /// How many of the object's bytes lie after what the type tree covers.
     pub rest: usize,
 }
 
@@ -71,19 +87,31 @@ impl Decoded {
     }
 }
 
+/// A parsed SerializedFile: its header fields, type table, object table, script references and external files, with
+/// the file's bytes kept so objects can be read from it.
 #[derive(Clone, Debug)]
 pub struct SerializedFile {
+    /// The container version (21 or 22: see [`VERSIONS`]).
     pub version: u32,
+    /// The Unity version string the file was built with (`2019.4.20f1`).
     pub unity_version: String,
+    /// [`SerializedFile::unity_version`], parsed.
     pub unity: UnityVersion,
+    /// Unity's `BuildTarget` number the file was built for.
     pub target_platform: i32,
+    /// Whether the metadata and the objects' bytes are big-endian.
     pub big_endian: bool,
+    /// The type table.
     pub types: Vec<SerializedType>,
+    /// The object table, in file order.
     pub objects: Vec<ObjectInfo>,
     /// Script references: (file index, path id).
     pub script_types: Vec<(i32, i64)>,
+    /// The files this file's pointers can name (file id = index + 1).
     pub externals: Vec<External>,
+    /// The table of types of managed references (`[SerializeReference]`).
     pub ref_types: Vec<SerializedType>,
+    /// The user string at the end of the metadata.
     pub user_information: String,
     data: Vec<u8>,
     by_path_id: BTreeMap<i64, usize>,
@@ -140,6 +168,10 @@ impl SerializedFile {
         }
     }
 
+    /// Parse the SerializedFile `data`. The header's sizes must match `data`, the object table must lie inside it and
+    /// the metadata must end exactly where the header says; a version outside [`VERSIONS`], a file with embedded type
+    /// trees, a duplicate path id and every length that runs past the bytes are refused with an [`Error`] that names
+    /// what was found.
     pub fn parse(data: Vec<u8>) -> Result<Self> {
         let mut h = Reader::new(&data, true);
         let legacy_metadata = h.u32()?;
@@ -269,10 +301,13 @@ impl SerializedFile {
         })
     }
 
+    /// The object with this path id, if the file has one.
     pub fn object(&self, path_id: i64) -> Option<&ObjectInfo> {
         self.by_path_id.get(&path_id).map(|&i| &self.objects[i])
     }
 
+    /// The bytes of an object of this file. `o` must come from this file's own [`SerializedFile::objects`] (an
+    /// [`ObjectInfo`] of another file may name bytes outside this one, and panics).
     pub fn bytes(&self, o: &ObjectInfo) -> &[u8] {
         &self.data[o.offset as usize..o.offset as usize + o.size as usize]
     }

@@ -21,9 +21,13 @@ use crate::{Result, invalid};
 /// (a stripped build has no type tree for them).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UnityBehaviour {
+    /// The MonoBehaviour object.
     pub behaviour: ObjRef,
+    /// The script's class, `namespace.class`; empty when the script cannot be resolved.
     pub script: String,
+    /// `m_Enabled`.
     pub enabled: bool,
+    /// The script's serialized fields, as bytes.
     #[serde(skip)]
     pub data: Vec<u8>,
 }
@@ -36,11 +40,17 @@ pub struct UnityBehaviour {
 /// beside it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UnityAmbient {
+    /// `m_AmbientMode`.
     pub mode: i64,
+    /// `m_AmbientSkyColor`, RGBA.
     pub sky: [f32; 4],
+    /// `m_AmbientEquatorColor`, RGBA.
     pub equator: [f32; 4],
+    /// `m_AmbientGroundColor`, RGBA.
     pub ground: [f32; 4],
+    /// `m_AmbientIntensity`.
     pub intensity: f32,
+    /// `m_AmbientProbe`: 27 coefficients, red then green then blue; `None` when none is stored.
     pub probe: Option<[f32; 27]>,
 }
 
@@ -49,17 +59,24 @@ pub struct UnityAmbient {
 /// `end`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UnityFog {
+    /// `m_Fog`.
     pub enabled: bool,
+    /// `m_FogMode`.
     pub mode: i64,
+    /// `m_FogColor`, RGBA.
     pub color: [f32; 4],
+    /// `m_FogDensity`.
     pub density: f32,
+    /// `m_LinearFogStart`.
     pub start: f32,
+    /// `m_LinearFogEnd`.
     pub end: f32,
 }
 
 /// A 4x4 matrix, rows of columns (`m[row][col]`), column vectors: Unity's `Matrix4x4` layout, in f64.
 pub type Matrix = [[f64; 4]; 4];
 
+/// The identity matrix.
 pub const IDENTITY: Matrix = [
     [1.0, 0.0, 0.0, 0.0],
     [0.0, 1.0, 0.0, 0.0],
@@ -67,6 +84,7 @@ pub const IDENTITY: Matrix = [
     [0.0, 0.0, 0.0, 1.0],
 ];
 
+/// The product `a * b`.
 pub fn mul(a: &Matrix, b: &Matrix) -> Matrix {
     let mut m = [[0.0; 4]; 4];
     for (i, row) in m.iter_mut().enumerate() {
@@ -157,10 +175,14 @@ fn values<'a>(v: &'a Value, k: &str) -> Result<&'a [Value]> {
     }
 }
 
+/// A GameObject as stored.
 #[derive(Clone, Debug)]
 pub struct GameObject {
+    /// `m_Name`.
     pub name: String,
+    /// `m_IsActive`.
     pub active: bool,
+    /// `m_Layer`.
     pub layer: u32,
     /// Its components' path ids, in order.
     pub components: Vec<i64>,
@@ -170,7 +192,9 @@ pub struct GameObject {
 /// (`m_IsActive`), or the component itself stored disabled (`m_Enabled`); path ids in the scene's file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OffFlag {
+    /// The GameObject (path id) is stored inactive.
     Inactive(i64),
+    /// The component (path id) is stored disabled.
     Disabled(i64),
 }
 
@@ -188,10 +212,15 @@ struct Node {
 /// position, rotation (`[x, y, z, w]`) and scale as stored, in Unity's frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneJoint {
+    /// The GameObject's name.
     pub name: String,
+    /// The parent Transform's path id; `None` for a root.
     pub father: Option<i64>,
+    /// Local position.
     pub translation: [f64; 3],
+    /// Local rotation, a quaternion `[x, y, z, w]`.
     pub rotation: [f64; 4],
+    /// Local scale.
     pub scale: [f64; 3],
 }
 
@@ -199,11 +228,17 @@ pub struct SceneJoint {
 /// controller that lists its clips and its avatar; a null pointer is `None`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Animator {
+    /// The Animator object.
     pub animator: ObjRef,
+    /// The path id of the GameObject it animates.
     pub game_object: i64,
+    /// That GameObject's path from the scene root, names joined by `/`.
     pub path: String,
+    /// `m_Controller`.
     pub controller: Option<ObjRef>,
+    /// `m_Avatar`.
     pub avatar: Option<ObjRef>,
+    /// `m_Enabled` (true when the Animator does not store one).
     pub enabled: bool,
     /// `m_ApplyRootMotion`.
     pub apply_root_motion: bool,
@@ -212,6 +247,7 @@ pub struct Animator {
 /// A character: an Animator with skinned renderers on its GameObject or below it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Character {
+    /// The Animator.
     pub animator: Animator,
     /// The SkinnedMeshRenderers on the Animator's GameObject and its descendants.
     pub skinned_renderers: usize,
@@ -221,7 +257,9 @@ pub struct Character {
 /// order, and its root bone; a null entry stays `None`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RendererSkin {
+    /// `m_Bones`: the bone Transforms (path ids) in slot order.
     pub bones: Vec<Option<i64>>,
+    /// `m_RootBone`.
     pub root_bone: Option<i64>,
     /// `m_BlendShapeWeights`: the weight of each of the mesh's blend shape channels (0 to 100 for a full shape).
     pub blend_weights: Vec<f32>,
@@ -230,13 +268,17 @@ pub struct RendererSkin {
 /// A mesh renderer with a mesh, whatever its state.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Renderer {
+    /// The renderer object.
     pub renderer: ObjRef,
     /// Its GameObject, in the scene file.
     pub game_object: i64,
     /// The GameObject path, names from the root joined by `/`.
     pub path: String,
+    /// Its GameObject's layer.
     pub layer: u32,
+    /// The mesh (a SkinnedMeshRenderer's own, else its MeshFilter's).
     pub mesh: ObjRef,
+    /// `m_Materials`, one entry per submesh slot; `None` for a null pointer.
     pub materials: Vec<Option<ObjRef>>,
     /// World matrix in Unity's frame (the identity for a static-batched renderer).
     pub world: Matrix,
@@ -256,10 +298,15 @@ pub struct Renderer {
 /// finest first; whether the component is enabled (a disabled LODGroup switches no level off) and its own off flags.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LodGroup {
+    /// The LODGroup object.
     pub group: ObjRef,
+    /// Its GameObject's path from the scene root, names joined by `/`.
     pub path: String,
+    /// `m_Enabled`.
     pub enabled: bool,
+    /// What keeps the group from switching levels.
     pub off: Vec<OffFlag>,
+    /// Per level, the path ids of its renderers.
     pub levels: Vec<Vec<i64>>,
 }
 
@@ -269,9 +316,13 @@ const MAX_DEPTH: usize = 1024;
 /// What the scene reading skipped, by reason.
 pub type Skipped = std::collections::BTreeMap<&'static str, u64>;
 
+/// A scene file's hierarchy: its GameObjects and Transforms, and from them the paths and world matrices of what the
+/// scene holds.
 #[derive(Debug)]
 pub struct Scene {
+    /// The scene's file (`level1`).
     pub file: String,
+    /// The scene's GameObjects by path id.
     pub game_objects: BTreeMap<i64, GameObject>,
     nodes: BTreeMap<i64, Node>,
     /// GameObject -> its Transform.
@@ -580,6 +631,7 @@ impl Scene {
         parts.join("/")
     }
 
+    /// The Transform of a GameObject (both path ids).
     pub fn transform_of(&self, game_object: i64) -> Option<i64> {
         self.transform_of.get(&game_object).copied()
     }
@@ -1287,14 +1339,10 @@ impl Scene {
 /// A collider's shape as stored, in its GameObject's space (Unity's frame).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ColliderShape {
-    Box {
-        center: [f64; 3],
-        size: [f64; 3],
-    },
-    Sphere {
-        center: [f64; 3],
-        radius: f64,
-    },
+    /// A box collider.
+    Box { center: [f64; 3], size: [f64; 3] },
+    /// A sphere collider.
+    Sphere { center: [f64; 3], radius: f64 },
     /// `direction`: the axis its height runs along (0 x, 1 y, 2 z); `height` includes the caps.
     Capsule {
         center: [f64; 3],
@@ -1302,24 +1350,31 @@ pub enum ColliderShape {
         height: f64,
         direction: usize,
     },
-    Mesh {
-        mesh: Option<ObjRef>,
-        convex: bool,
-    },
+    /// A mesh collider: its mesh (`None` for a null pointer) and whether it is convex.
+    Mesh { mesh: Option<ObjRef>, convex: bool },
 }
 
 /// A collider as stored: its shape, its off flags, whether it is a trigger, its physic material, and the Rigidbody on
 /// it or its nearest ancestor (`Some(true)`: kinematic).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColliderComponent {
+    /// The collider object.
     pub collider: ObjRef,
+    /// Its GameObject's path from the scene root, names joined by `/`.
     pub path: String,
+    /// Its GameObject's layer.
     pub layer: u32,
+    /// The matrix of its GameObject: world, or relative to `root` when one was given.
     pub world: Matrix,
+    /// The shape.
     pub shape: ColliderShape,
+    /// What keeps it from colliding; collides when empty.
     pub off: Vec<OffFlag>,
+    /// `m_IsTrigger`.
     pub trigger: bool,
+    /// `m_Material`.
     pub physic_material: Option<ObjRef>,
+    /// The nearest Rigidbody: `Some(kinematic)`; `None` when there is none.
     pub rigidbody: Option<bool>,
 }
 
@@ -1328,25 +1383,43 @@ pub struct ColliderComponent {
 /// used), bounce intensity, URP's light unit and lux-at-distance, area size, render mode and culling mask.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LightComponent {
+    /// The Light object.
     pub light: ObjRef,
+    /// Its GameObject's path from the scene root, names joined by `/`.
     pub path: String,
+    /// Its GameObject's world matrix.
     pub world: Matrix,
+    /// `m_Type`.
     pub kind: i64,
+    /// `m_Color`, RGBA.
     pub color: [f32; 4],
+    /// `m_Intensity` (1 when not stored).
     pub intensity: f32,
+    /// `m_Range` (10 when not stored).
     pub range: f32,
+    /// `m_SpotAngle` (30 when not stored).
     pub spot_angle: f32,
+    /// `m_InnerSpotAngle` (0 when not stored).
     pub inner_spot_angle: f32,
+    /// `m_Shadows.m_Type` (0 when not stored).
     pub shadows: i64,
+    /// `m_ColorTemperature`, when `m_UseColorTemperature` is on.
     pub color_temperature: Option<f32>,
+    /// `m_BounceIntensity` (1 when not stored).
     pub bounce_intensity: f32,
+    /// `m_LightUnit`, when stored.
     pub light_unit: Option<i64>,
+    /// `m_LuxAtDistance`, when stored.
     pub lux_at_distance: Option<f32>,
+    /// `m_AreaSize` (1 x 1 when not stored).
     pub area_size: [f32; 2],
+    /// `m_RenderMode` (0 when not stored).
     pub render_mode: i64,
     /// Fully baked: `m_BakingOutput` says baked, as `Baked` (2), not mixed or realtime.
     pub baked: bool,
+    /// `m_CullingMask`'s bits (all layers when not stored).
     pub culling_mask: u32,
+    /// `m_Cookie`.
     pub cookie: Option<ObjRef>,
     /// What keeps it from shining; shines when empty.
     pub off: Vec<OffFlag>,
@@ -1356,8 +1429,11 @@ pub struct LightComponent {
 /// renders into (`m_TargetTexture`; `None`: it draws to the screen).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CameraComponent {
+    /// The Camera object.
     pub camera: ObjRef,
+    /// Its GameObject's path from the scene root, names joined by `/`.
     pub path: String,
+    /// Its GameObject's world matrix.
     pub world: Matrix,
     pub culling_mask: u32,
     pub target_texture: Option<ObjRef>,
@@ -1368,10 +1444,15 @@ pub struct CameraComponent {
 /// A terrain's collider: its own TerrainData (which may differ from the drawn one), physic material, tree colliders.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TerrainColliderComponent {
+    /// The TerrainCollider object.
     pub collider: ObjRef,
+    /// `m_Enabled`.
     pub enabled: bool,
+    /// `m_TerrainData`.
     pub data: Option<ObjRef>,
+    /// `m_Material`.
     pub material: Option<ObjRef>,
+    /// `m_EnableTreeColliders`.
     pub tree_colliders: bool,
 }
 
@@ -1379,22 +1460,34 @@ pub struct TerrainColliderComponent {
 /// its data, material, collider and off flags (drawn when empty).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TerrainComponent {
+    /// The Terrain object.
     pub terrain: ObjRef,
+    /// Its GameObject's path from the scene root, names joined by `/`.
     pub path: String,
+    /// Its GameObject's world matrix.
     pub world: Matrix,
+    /// `m_TerrainData`, read with [`crate::terrain::TerrainData::read`].
     pub data: ObjRef,
+    /// `m_MaterialTemplate`.
     pub material: Option<ObjRef>,
+    /// `m_DrawHeightmap`.
     pub draw_heightmap: bool,
+    /// `m_DrawTreesAndFoliage`.
     pub draw_trees: bool,
+    /// The terrain's TerrainCollider, if its GameObject has one.
     pub collider: Option<TerrainColliderComponent>,
+    /// What keeps it from being drawn; drawn when empty.
     pub off: Vec<OffFlag>,
 }
 
 /// A scene's RenderSettings as read ([`Scene::render_settings`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneRenderSettings {
+    /// `m_Sun`: the Light the scene names as its sun.
     pub sun: Option<ObjRef>,
+    /// The ambient lighting; `None` when the RenderSettings state no `m_AmbientMode`.
     pub ambient: Option<UnityAmbient>,
+    /// The fog; `None` when the RenderSettings state no `m_Fog`.
     pub fog: Option<UnityFog>,
 }
 

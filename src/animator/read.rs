@@ -1,4 +1,4 @@
-//! Reading an Avatar, an AnimatorController and an Animator into the typed data of [`crate::animator`]. Every field is
+//! Reading an Avatar and an AnimatorController into the typed data of [`crate::animator`]. Every field is
 //! required: a missing or mistyped one is an error naming it and the object (nothing defaults to zero).
 
 use crate::animator::{

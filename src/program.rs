@@ -26,17 +26,24 @@ use crate::{Result, invalid};
 /// size (0: not an array).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Field {
+    /// The field's name.
     pub name: String,
+    /// The field's byte offset in its buffer.
     pub offset: u32,
+    /// Unity's `ShaderParamType` of the element.
     pub kind: i64,
+    /// A vector or a matrix.
     pub shape: Shape,
+    /// The array length; 0 when the field is not an array.
     pub array_size: u32,
 }
 
 /// A field's shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum Shape {
+    /// A vector of this many lanes.
     Vector { columns: u32 },
+    /// A matrix of this many rows.
     Matrix { rows: u32 },
 }
 
@@ -44,10 +51,15 @@ pub enum Shape {
 /// an array), the struct's size in bytes and its members (offsets within the struct).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct StructField {
+    /// The field's name.
     pub name: String,
+    /// The field's byte offset in its buffer.
     pub offset: u32,
+    /// The array length; 0 when the field is not an array.
     pub array_size: u32,
+    /// The struct's size in bytes.
     pub size: u32,
+    /// The struct's members, their offsets within the struct.
     pub members: Vec<Field>,
 }
 
@@ -55,10 +67,15 @@ pub struct StructField {
 /// bytes, its fields and its struct fields (by offset).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ConstantBuffer {
+    /// The buffer's name.
     pub name: String,
+    /// The bind slot (`b<n>`), when a binding names the buffer.
     pub slot: Option<u32>,
+    /// The buffer's size in bytes.
     pub size: u32,
+    /// The buffer's fields.
     pub fields: Vec<Field>,
+    /// The buffer's struct fields, by offset.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub structs: Vec<StructField>,
 }
@@ -67,16 +84,22 @@ pub struct ConstantBuffer {
 /// dimension (Unity's `TextureDimension`: 2 a 2D texture, 3 3D, 4 a cube).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct TextureParam {
+    /// The texture's name.
     pub name: String,
+    /// The bind slot (`t<n>`).
     pub slot: u32,
+    /// The slot of the sampler it samples with; `None` when it has none of its own.
     pub sampler: Option<u32>,
+    /// Unity's `TextureDimension`: 2 a 2D texture, 3 a 3D texture, 4 a cube.
     pub dim: i64,
 }
 
 /// The parameters the variants of a program share.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Parameters {
+    /// The constant buffers.
     pub constant_buffers: Vec<ConstantBuffer>,
+    /// The texture parameters.
     pub textures: Vec<TextureParam>,
     /// Sampler states: Unity's packed sampler value and its bind slot (`s<n>`).
     pub samplers: Vec<(u32, u32)>,
@@ -88,15 +111,22 @@ pub struct Parameters {
 /// (before); `parameters` its own, where the player stores them per variant (before 2021.2), else `None`: the pass's.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Variant {
+    /// The index of the player sub-program list the variant is in (2021.2 on), or its hardware tier (before).
     pub group: usize,
+    /// The entry of the platform's blob that holds the variant's program record.
     pub blob_index: u32,
+    /// The keywords the variant is compiled with.
     pub keywords: Vec<String>,
+    /// Unity's `ShaderGpuProgramType`.
     pub gpu_program_type: i64,
+    /// The shader requirements mask.
     pub requirements: i64,
     /// The blob entry holding this variant's own parameters, where the player stores them there (from 2021.2:
     /// `m_ParameterBlobIndices`, parallel to the sub-program lists).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameter_blob: Option<u32>,
+    /// The variant's own parameters, where the player stores them per variant (before 2021.2); `None`: the pass
+    /// program's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<Parameters>,
 }
@@ -105,7 +135,9 @@ pub struct Variant {
 /// own).
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct PassProgram {
+    /// The variants, in stored order.
     pub variants: Vec<Variant>,
+    /// The parameters the variants share.
     pub parameters: Parameters,
 }
 
@@ -120,14 +152,20 @@ impl PassProgram {
 /// `progDomain`), in that order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub enum Stage {
+    /// `progVertex`.
     Vertex,
+    /// `progFragment`.
     Fragment,
+    /// `progGeometry`.
     Geometry,
+    /// `progHull`.
     Hull,
+    /// `progDomain`.
     Domain,
 }
 
 impl Stage {
+    /// Every stage, in Unity's order.
     pub const ALL: [Stage; 5] = [
         Stage::Vertex,
         Stage::Fragment,
@@ -151,14 +189,20 @@ impl Stage {
 /// One pass's programs, a [`PassProgram`] per stage (empty where the pass stores none for it).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PassStages {
+    /// The vertex program.
     pub vertex: PassProgram,
+    /// The fragment program.
     pub fragment: PassProgram,
+    /// The geometry program.
     pub geometry: PassProgram,
+    /// The hull program.
     pub hull: PassProgram,
+    /// The domain program.
     pub domain: PassProgram,
 }
 
 impl PassStages {
+    /// The program of `stage`.
     pub fn stage(&self, stage: Stage) -> &PassProgram {
         match stage {
             Stage::Vertex => &self.vertex,
@@ -173,7 +217,9 @@ impl PassStages {
 /// A Shader's compiled programs: `passes[subshader][pass]`, and its per-platform blobs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShaderPrograms {
+    /// The shader's name (`m_ParsedForm.m_Name`).
     pub name: String,
+    /// The passes of each subshader.
     pub passes: Vec<Vec<PassStages>>,
     /// Unity's `ShaderCompilerPlatform` of each blob (4: D3D11).
     pub platforms: Vec<i64>,

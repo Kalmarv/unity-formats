@@ -1,10 +1,10 @@
 //! A Universal Render Pipeline asset's lighting and shadow settings, decoded from the bytes of its
 //! `UniversalRenderPipelineAsset` MonoBehaviour (a build has no type tree for a script's fields).
 //!
-//! The field order is the class's declaration order in the package (checked against the 17.6.0 source and against an
-//! asset of a player: the 452 bytes of its three assets read to the same values as the keywords of the variants the
-//! player stores for them, `tests/resolve_shaders.rs`). It holds for `k_AssetVersion` 13 only; another version is
-//! refused. A field is a 4-byte value, or a bool padded to 4 bytes; an object reference is 12 bytes (file id and a 64-bit
+//! The field order is the class's declaration order in the Universal RP package (checked against its 17.6.0 source and
+//! against one player: the 452 bytes of its three assets read to the same settings as the keywords of the shader
+//! variants the player stores for them, as [this test of primase](https://github.com/Kalmarv/primase/tree/main/worlds/unity/tests/resolve_shaders.rs)
+//! compares). It holds for `k_AssetVersion` 13 only; another version is refused. A field is a 4-byte value, or a bool padded to 4 bytes; an object reference is 12 bytes (file id and a 64-bit
 //! path id) and an array is its count and elements. The class's later fields (batching, post-processing, the GPU
 //! resident drawer) are not read, and the layout past the first of them is not verified.
 
@@ -14,24 +14,38 @@ use serde::Serialize;
 use crate::{Result, invalid};
 
 /// The lighting and shadow settings of a Universal Render Pipeline asset as stored (`UniversalRenderPipelineAsset`,
-/// asset version 13; [`crate::pipeline`] holds the verified layout): the light modes as `LightRenderingMode`
+/// asset version 13; this module's docs state the verified layout): the light modes as `LightRenderingMode`
 /// numbers them (0 disabled, 1 per pixel, 2 per vertex), the shadow cascade count (1 to 4), the settings that decide
 /// which of a pass's keywords the pipeline sets.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UnityUrpSettings {
+    /// The main light's rendering mode (`m_MainLightRenderingMode`).
     pub main_light_mode: i64,
+    /// Whether the main light casts shadows.
     pub main_light_shadows: bool,
+    /// The additional lights' rendering mode (`m_AdditionalLightsRenderingMode`).
     pub additional_lights_mode: i64,
+    /// Whether additional lights cast shadows.
     pub additional_light_shadows: bool,
+    /// Whether reflection probes blend.
     pub reflection_probe_blending: bool,
+    /// Whether reflection probes use box projection.
     pub reflection_probe_box_projection: bool,
+    /// Whether reflection probes are packed into an atlas.
     pub reflection_probe_atlas: bool,
+    /// `m_ShadowDistance`.
     pub shadow_distance: f32,
+    /// `m_ShadowCascadeCount`.
     pub shadow_cascades: u8,
+    /// Whether soft shadows are supported.
     pub soft_shadows: bool,
+    /// Whether mixed lighting is supported.
     pub mixed_lighting: bool,
+    /// Whether light cookies are supported.
     pub light_cookies: bool,
+    /// Whether light layers are supported.
     pub light_layers: bool,
+    /// Whether LOD cross-fading is enabled.
     pub lod_cross_fade: bool,
     /// `ShEvalMode`: 0 auto, 1 per vertex, 2 mixed, 3 per pixel.
     pub sh_eval_mode: i64,

@@ -12,22 +12,32 @@ use crate::{Result, invalid};
 /// A texture property: the texture (`None`: no texture set) and its tiling (`_ST`) with Unity's bottom-left origin.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TexEnv {
+    /// The texture object.
     pub texture: Option<ObjRef>,
+    /// The tiling (`m_Scale`).
     pub scale: [f32; 2],
+    /// The offset (`m_Offset`).
     pub offset: [f32; 2],
 }
 
 /// A `Material` as stored, its properties in stored order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnityMaterialData {
+    /// `m_Name`.
     pub name: String,
+    /// The material's shader; `None` for a null pointer.
     pub shader: Option<ObjRef>,
+    /// Texture properties by name (`m_TexEnvs`).
     pub textures: Vec<(String, TexEnv)>,
+    /// Float properties by name (`m_Floats`).
     pub floats: Vec<(String, f32)>,
+    /// Integer properties by name (`m_Ints`).
     pub ints: Vec<(String, i64)>,
     /// RGBA as stored (gamma-encoded for colour properties).
     pub colors: Vec<(String, [f32; 4])>,
+    /// The enabled shader keywords.
     pub keywords: Vec<String>,
+    /// Override tags (`stringTagMap`).
     pub tags: Vec<(String, String)>,
     /// `m_CustomRenderQueue` (-1: the shader's).
     pub render_queue: i64,
@@ -153,7 +163,9 @@ impl UnityMaterialData {
 /// A Shader's name and render state (`m_ParsedForm`); its compiled programs are not read.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShaderData {
+    /// The shader's name (`Universal Render Pipeline/Lit`).
     pub name: String,
+    /// The subshaders, in order.
     pub subshaders: Vec<SubShader>,
 }
 

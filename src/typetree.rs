@@ -19,11 +19,17 @@ pub const ALIGN: u32 = 0x4000;
 /// the tree's node list).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node {
+    /// The node's type name (`int`, `string`, `vector`, a class name, ...).
     pub ty: Arc<str>,
+    /// The field name.
     pub name: Arc<str>,
+    /// The size in bytes the tree states for a value of this node, or -1 where it varies.
     pub byte_size: i32,
+    /// The node's version, as stored.
     pub version: i32,
+    /// The meta flags: [`ALIGN`] and others the decoder does not use.
     pub meta_flag: u32,
+    /// Indices into [`TypeTree::nodes`], in field order; every child's index is greater than its parent's.
     pub children: Vec<usize>,
 }
 
@@ -89,6 +95,7 @@ enum Kind {
 /// A class's type tree; node 0 is the root.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypeTree {
+    /// The nodes, the root first.
     pub nodes: Vec<Node>,
     kinds: Vec<Kind>,
     /// Per node, the fewest bytes a value of it takes (alignment left out): what bounds a vector's count by the bytes
@@ -101,6 +108,8 @@ pub struct TypeTree {
 const MAX_EMPTY_ELEMENTS: usize = 1 << 16;
 
 impl TypeTree {
+    /// Build a tree from its nodes (the root first). Refused: no nodes, a child index that is not after its parent's
+    /// or not in the list, a `pair` without two children, or a vector whose `Array` child does not have two children.
     pub fn new(nodes: Vec<Node>) -> Result<Self> {
         if nodes.is_empty() {
             return Err(invalid("empty type tree"));
@@ -165,6 +174,7 @@ impl TypeTree {
         })
     }
 
+    /// The root node.
     pub fn root(&self) -> &Node {
         &self.nodes[0]
     }

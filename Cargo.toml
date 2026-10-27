@@ -1,11 +1,15 @@
 [package]
 name = "unity-formats"
-description = "Unity players' data files: SerializedFile containers, type trees, streamed resources and the objects of a scene"
+description = "Reads Unity games' data files: SerializedFiles, scenes, meshes, textures, shader programs and Animator data"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+keywords = ["unity", "assets", "modding", "serialized-file", "game-assets"]
+categories = ["parser-implementations", "game-development"]
+documentation = "https://docs.rs/unity-formats"
 publish.workspace = true
 
 [dependencies]

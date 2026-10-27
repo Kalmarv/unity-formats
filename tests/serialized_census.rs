@@ -94,20 +94,20 @@ fn matches_unitypy_census() {
         assert_eq!(
             ours.len(),
             file.objects.len(),
-            "{name}: primase object table has duplicate path ids"
+            "{name}: unity-formats object table has duplicate path ids"
         );
         assert_eq!(ours.len(), theirs.len(), "{name}: object table length");
         for (path_id, want) in &theirs {
             let [class_id, offset, size] = *want;
             match ours.get(path_id) {
                 None => panic!(
-                    "{name}: path id {path_id} missing from primase (UnityPy: class {class_id}, \
+                    "{name}: path id {path_id} missing from unity-formats (UnityPy: class {class_id}, \
                      offset {offset}, size {size})"
                 ),
                 Some(got) if *got != *want => {
                     let [got_class, got_offset, got_size] = *got;
                     panic!(
-                        "{name}: path id {path_id}: primase class {got_class}, offset {got_offset}, \
+                        "{name}: path id {path_id}: unity-formats class {got_class}, offset {got_offset}, \
                          size {got_size}; UnityPy class {class_id}, offset {offset}, size {size}"
                     );
                 }

@@ -67,6 +67,9 @@ fn count(r: &mut Reader, what: &str) -> Result<usize> {
 const MAX_TREE_NODES: usize = 1 << 20;
 
 impl TypeTreePackage {
+    /// Parse a type tree package (TPK format 1 or 2, uncompressed or LZ4). Every index in it is checked, the size an
+    /// LZ4 block claims is checked against what LZ4 can inflate to before anything is allocated for it, and a package
+    /// that is LZMA- or Brotli-compressed is refused as [`crate::Error::Unsupported`].
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let mut r = Reader::new(bytes, false);
         if r.u32()? != MAGIC {

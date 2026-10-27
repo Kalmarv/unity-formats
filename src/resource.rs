@@ -14,8 +14,11 @@ use crate::{Error, Result, invalid};
 /// Where an object's streamed data is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamingInfo {
+    /// Where the data starts in the file, in bytes.
     pub offset: u64,
+    /// The data's size in bytes.
     pub size: u64,
+    /// The resource file as the object names it: a plain file name, or `archive:/<name>/<name>`.
     pub path: String,
 }
 

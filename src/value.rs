@@ -8,23 +8,34 @@ use serde_json::{Map, Value as Json};
 /// A typed array of primitives.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Array {
+    /// `bool` elements.
     Bool(Vec<bool>),
+    /// `SInt8` elements.
     I8(Vec<i8>),
     /// `UInt8` / `char` elements, and `TypelessData`.
     U8(Vec<u8>),
+    /// `short` and `SInt16` elements.
     I16(Vec<i16>),
+    /// `unsigned short` and `UInt16` elements.
     U16(Vec<u16>),
+    /// `int` and `SInt32` elements.
     I32(Vec<i32>),
+    /// `unsigned int` and `UInt32` elements.
     U32(Vec<u32>),
+    /// `long long` and `SInt64` elements.
     I64(Vec<i64>),
+    /// `unsigned long long`, `UInt64` and `FileSize` elements.
     U64(Vec<u64>),
+    /// `float` elements.
     F32(Vec<f32>),
+    /// `double` elements.
     F64(Vec<f64>),
     /// Any other element type.
     Values(Vec<Value>),
 }
 
 impl Array {
+    /// The number of elements.
     pub fn len(&self) -> usize {
         match self {
             Array::Bool(v) => v.len(),
@@ -42,22 +53,30 @@ impl Array {
         }
     }
 
+    /// Whether there are no elements.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
 
+/// A decoded value: a primitive, a string, an array, a pair or a struct of named fields.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
+    /// A `bool`.
     Bool(bool),
     /// Signed integers of any width.
     Int(i64),
     /// Unsigned integers of any width.
     UInt(u64),
+    /// A `float`.
     Float(f32),
+    /// A `double`.
     Double(f64),
+    /// A `string`.
     String(String),
+    /// A vector (`Array` node) or `TypelessData`.
     Array(Array),
+    /// A `pair`.
     Pair(Box<(Value, Value)>),
     /// Fields in type tree order.
     Struct(Vec<(Arc<str>, Value)>),
@@ -77,6 +96,7 @@ impl Value {
         path.iter().try_fold(self, |v, k| v.get(k))
     }
 
+    /// The value as an `i64` when it is an integer that fits.
     pub fn as_i64(&self) -> Option<i64> {
         match *self {
             Value::Int(i) => Some(i),
@@ -85,6 +105,7 @@ impl Value {
         }
     }
 
+    /// The value when it is a `float`.
     pub fn as_f32(&self) -> Option<f32> {
         match *self {
             Value::Float(f) => Some(f),
@@ -92,6 +113,7 @@ impl Value {
         }
     }
 
+    /// The value when it is a string.
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Value::String(s) => Some(s),
@@ -99,6 +121,7 @@ impl Value {
         }
     }
 
+    /// The value when it is a `bool`.
     pub fn as_bool(&self) -> Option<bool> {
         match *self {
             Value::Bool(b) => Some(b),
@@ -106,6 +129,7 @@ impl Value {
         }
     }
 
+    /// The value when it is an array.
     pub fn as_array(&self) -> Option<&Array> {
         match self {
             Value::Array(a) => Some(a),
@@ -113,6 +137,7 @@ impl Value {
         }
     }
 
+    /// The bytes of a `UInt8`, `char` or `TypelessData` array.
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             Value::Array(Array::U8(b)) => Some(b),

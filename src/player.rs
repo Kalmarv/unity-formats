@@ -21,7 +21,9 @@ use crate::{Error, Result, invalid};
 /// An object of the player: its file (lower-case name) and path id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct ObjRef {
+    /// The file's lower-case name.
     pub file: String,
+    /// The object's path id in that file.
     pub path_id: i64,
 }
 
@@ -45,7 +47,9 @@ pub enum RenderPipeline {
 /// 255 for unlimited).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SkinWeights {
+    /// At most this many influences per vertex (1, 2 or 4).
     Bones(u32),
+    /// Every influence a mesh stores.
     Unlimited,
 }
 
@@ -75,10 +79,15 @@ impl std::fmt::Display for SkinWeights {
 /// built-in pipeline's cascade count, which a Universal Render Pipeline asset replaces with its own).
 #[derive(Clone, Debug, PartialEq)]
 pub struct QualityLevel {
+    /// The level's name.
     pub name: String,
+    /// The bone influences a vertex may have (`skinWeights`).
     pub skin_weights: SkinWeights,
+    /// `shadows`: 0 disabled, 1 hard shadows only, 2 all.
     pub shadows: i64,
+    /// `shadowDistance`: how far from the camera shadows are drawn.
     pub shadow_distance: f32,
+    /// `shadowCascades`: the built-in pipeline's cascade count.
     pub shadow_cascades: i64,
 }
 
@@ -95,8 +104,11 @@ pub struct BuildScene {
     pub name: String,
 }
 
+/// A Unity player's data folder, read: every SerializedFile in it (and in its `Resources` folder), and the type tree
+/// package that decodes their objects. Objects are named by [`ObjRef`] and decoded on demand.
 #[derive(Debug)]
 pub struct Player {
+    /// The data folder.
     pub dir: PathBuf,
     /// By lower-case file name: `level1`, `sharedassets1.assets`, `unity default resources`, ...
     pub files: BTreeMap<String, SerializedFile>,
@@ -150,6 +162,7 @@ impl Player {
         })
     }
 
+    /// The serialized file called `name` (lower case), or an error naming it.
     pub fn file(&self, name: &str) -> Result<&SerializedFile> {
         self.files
             .get(name)

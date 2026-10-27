@@ -40,23 +40,29 @@ pub const CHANNELS: [&str; 14] = [
 /// One decoded channel: `dim` components per vertex.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Channel {
+    /// Components per vertex.
     pub dim: usize,
+    /// `dim` floats for each vertex, vertex after vertex.
     pub values: Vec<f32>,
 }
 
 impl Channel {
+    /// Vertex `i`'s components. Panics when `i` is not a vertex of the channel.
     pub fn vertex(&self, i: usize) -> &[f32] {
         &self.values[i * self.dim..(i + 1) * self.dim]
     }
 }
 
+/// A submesh: a run of the index buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SubMesh {
     /// Into the index buffer, in bytes.
     pub first_byte: u32,
+    /// How many indices the run holds.
     pub index_count: u32,
     /// Unity's MeshTopology (0: triangles).
     pub topology: i64,
+    /// `baseVertex` as stored: the vertex the run's indices count from.
     pub base_vertex: u32,
 }
 
@@ -64,8 +70,12 @@ pub struct SubMesh {
 /// `weights[starts[v]..starts[v + 1]]` and `bones[..]`, heaviest first.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Blend {
+    /// Where each vertex's influences start in `weights` and `bones`: one entry more than there are vertices, the
+    /// last the total.
     pub starts: Vec<u32>,
+    /// The influences' weights, vertex after vertex.
     pub weights: Vec<f32>,
+    /// The influences' bone slots, parallel to `weights`.
     pub bones: Vec<u32>,
 }
 
@@ -85,6 +95,7 @@ impl Blend {
         }
     }
 
+    /// How many vertices the blend covers.
     pub fn vertices(&self) -> usize {
         self.starts.len().saturating_sub(1)
     }
@@ -119,6 +130,8 @@ pub struct MeshSkin {
     /// Bone slots are slots of the renderer's bone list (`m_Bones`); a mesh with indices but no weights channel binds
     /// each vertex to its one bone wholly.
     pub channel: Blend,
+    /// The full influences of a mesh that stores more than four a vertex (`m_VariableBoneCountWeights`); `None` for a
+    /// mesh that does not.
     pub unlimited: Option<Blend>,
     /// `m_BindPose`, row-major (`[row][column]`, the translation in column 3).
     pub bind_poses: Vec<[[f64; 4]; 4]>,
@@ -143,7 +156,7 @@ impl MeshSkin {
         )
     }
 
-    /// The sets of four influences `limit` draws: `Joints(k)`/`Weights(k)` for each.
+    /// How many sets of four influences a vertex has under `limit`: at least one.
     pub fn sets(&self, limit: SkinWeights) -> usize {
         self.outcome(limit).1.div_ceil(4).max(1)
     }
@@ -182,18 +195,24 @@ type BlendChannels = (usize, Vec<[f32; 4]>, Vec<[u32; 4]>);
 /// A mesh as stored, in Unity's frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnityMeshData {
+    /// `m_Name`.
     pub name: String,
+    /// How many vertices the mesh has.
     pub vertex_count: usize,
     /// By shader channel (see [`CHANNELS`]); the blend weights and indices are in [`UnityMeshData::skin`].
     pub channels: [Option<Channel>; 12],
     /// The mesh's skin: its blend weights and indices with the bind poses; `None` for a mesh without blend data.
     pub skin: Option<MeshSkin>,
+    /// Whether the vertices were stored as a `CompressedMesh` (bit-packed) rather than as vertex streams.
     pub compressed: bool,
     /// The mesh's blend shapes; `None` for a mesh without any.
     pub shapes: Option<MeshShapes>,
     /// The index buffer, decoded.
     pub indices: Vec<u32>,
+    /// The width in bytes of an index in the stored index buffer (2 or 4), which a submesh's `first_byte` counts in;
+    /// `indices` holds them widened to `u32`.
     pub index_size: u32,
+    /// The submeshes, in order.
     pub submeshes: Vec<SubMesh>,
 }
 
@@ -201,9 +220,13 @@ pub struct UnityMeshData {
 /// frames (`frames` of them from `first_frame` in [`MeshShapes::frames`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShapeChannel {
+    /// The channel's name.
     pub name: String,
+    /// The channel name's CRC-32, which an animation curve names the channel by.
     pub name_hash: u32,
+    /// Index of the channel's first frame in [`MeshShapes::frames`].
     pub first_frame: usize,
+    /// How many frames the channel has.
     pub frames: usize,
 }
 
@@ -211,19 +234,28 @@ pub struct ShapeChannel {
 /// (`count` from `first` in [`MeshShapes::vertices`]) and whether they carry normal and tangent deltas.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShapeFrame {
+    /// The weight the frame is at (`fullWeights`).
     pub weight: f32,
+    /// Index of the frame's first entry in [`MeshShapes::vertices`].
     pub first: usize,
+    /// How many entries the frame has.
     pub count: usize,
+    /// Whether the entries carry normal deltas (`hasNormals`).
     pub normals: bool,
+    /// Whether the entries carry tangent deltas (`hasTangents`).
     pub tangents: bool,
 }
 
 /// A blend shape entry (`m_Shapes.vertices`): the delta of vertex `index` of the mesh, in Unity's frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShapeVertex {
+    /// The vertex of the mesh the delta applies to.
     pub index: u32,
+    /// The position delta.
     pub position: [f32; 3],
+    /// The normal delta (zero unless the frame has normals).
     pub normal: [f32; 3],
+    /// The tangent delta (zero unless the frame has tangents).
     pub tangent: [f32; 3],
 }
 
@@ -231,8 +263,11 @@ pub struct ShapeVertex {
 /// 100), per frame sparse deltas of the mesh's vertices, applied to the mesh as stored before any skin.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeshShapes {
+    /// The channels (`m_Shapes.channels`).
     pub channels: Vec<ShapeChannel>,
+    /// Every channel's frames, one after another (`m_Shapes.shapes` with `fullWeights`).
     pub frames: Vec<ShapeFrame>,
+    /// The frames' entries, one frame after another (`m_Shapes.vertices`).
     pub vertices: Vec<ShapeVertex>,
 }
 

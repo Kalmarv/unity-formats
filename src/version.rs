@@ -12,6 +12,7 @@ pub struct UnityVersion(pub u64);
 const TYPES: [char; 6] = ['a', 'b', 'c', 'f', 'p', 'x'];
 
 impl UnityVersion {
+    /// Pack a version from its parts (`kind` 0 to 5: a, b, c, f, p, x).
     pub fn new(major: u16, minor: u16, build: u16, kind: u8, number: u8) -> Self {
         UnityVersion(
             u64::from(major) << 48
@@ -46,12 +47,15 @@ impl UnityVersion {
         Ok(Self::new(major, minor, build, kind, number))
     }
 
+    /// The major version (`6000`, `2019`).
     pub fn major(self) -> u16 {
         (self.0 >> 48) as u16
     }
+    /// The minor version.
     pub fn minor(self) -> u16 {
         (self.0 >> 32) as u16
     }
+    /// The build number (`12` of `6000.3.12f1`).
     pub fn build(self) -> u16 {
         (self.0 >> 16) as u16
     }

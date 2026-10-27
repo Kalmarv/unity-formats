@@ -17,11 +17,15 @@ pub const USAGE_NORMAL_PLAIN: i64 = 4;
 /// A `Texture2D` as stored.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnityTexture {
+    /// `m_Name`.
     pub name: String,
+    /// Width in pixels of the largest level.
     pub width: u32,
+    /// Height in pixels of the largest level.
     pub height: u32,
     /// Unity's TextureFormat id.
     pub format: i64,
+    /// `m_MipCount`: how many levels `data` holds.
     pub mips: u32,
     /// `m_ColorSpace` 1: sampled as sRGB.
     pub srgb: bool,

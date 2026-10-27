@@ -10,7 +10,9 @@ use crate::player::{ObjRef, Player};
 /// One object of a listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectEntry {
+    /// The object's file and path id.
     pub object: ObjRef,
+    /// Unity's class id from the object table.
     pub class_id: i32,
     /// The class name from the type tree package; `None` for a class id the package lacks for this Unity version.
     pub class: Option<String>,
