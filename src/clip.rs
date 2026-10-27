@@ -100,8 +100,11 @@ impl Curve {
         if t >= last.time {
             return (last.value, if t == last.time { last.in_slope } else { 0.0 }, 0.0);
         }
-        let i = k.partition_point(|key| key.time <= t) - 1;
-        let (a, b) = (&k[i], &k[i + 1]);
+        // the first key after `t`, and the one before it; `t` is strictly between the first and last keys
+        let after = k.partition_point(|key| key.time <= t);
+        let (Some(a), Some(b)) = (after.checked_sub(1).and_then(|i| k.get(i)), k.get(after)) else {
+            return (last.value, 0.0, 0.0);
+        };
         if t == a.time {
             return (a.value, a.in_slope, a.out_slope);
         }
@@ -124,7 +127,7 @@ impl Curve {
             + (-6.0 * s2 + 6.0 * s) * p1
             + (3.0 * s2 - 2.0 * s) * m1)
             / dt;
-        (value as f32, slope as f32, slope as f32)
+        (crate::narrow(value), crate::narrow(slope), crate::narrow(slope))
     }
 
     /// Whether any slope is a step.
@@ -212,17 +215,15 @@ fn read_streamed(name: &str, words: &[u32], curve_count: usize) -> Result<(Vec<C
     let mut entries: Vec<Vec<(f32, [f32; 4])>> = vec![Vec::new(); curve_count];
     let mut at = 0;
     let take = |at: &mut usize, n: usize| -> Result<&[u8]> {
-        let part = at
-            .checked_add(n)
-            .and_then(|end| bytes.get(*at..end))
-            .ok_or_else(|| {
-                bad(format!(
-                    "frames past the data at byte {at} of {}",
-                    bytes.len(),
-                    at = *at
-                ))
-            })?;
-        *at += n;
+        let end = at.checked_add(n);
+        let part = end.and_then(|end| bytes.get(*at..end)).ok_or_else(|| {
+            bad(format!(
+                "frames past the data at byte {at} of {}",
+                bytes.len(),
+                at = *at
+            ))
+        })?;
+        *at = end.unwrap_or(*at);
         Ok(part)
     };
     let mut last_time = f32::NEG_INFINITY;
@@ -367,8 +368,12 @@ fn read_dense(name: &str, dense: &Value) -> Result<Vec<Curve>> {
                 .map(|(f, (&value, &time))| Key {
                     time,
                     value,
-                    in_slope: if f > 0 { slope(f - 1, f) } else { 0.0 },
-                    out_slope: if f + 1 < frames { slope(f, f + 1) } else { 0.0 },
+                    in_slope: f.checked_sub(1).map_or(0.0, |p| slope(p, f)),
+                    out_slope: if f < frames.saturating_sub(1) {
+                        slope(f, f.saturating_add(1))
+                    } else {
+                        0.0
+                    },
                 })
                 .collect(),
         });

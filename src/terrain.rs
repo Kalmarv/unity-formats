@@ -91,13 +91,13 @@ pub fn check_heightmap(resolution: u32, heights: &[i16], holes: Option<&[u8]>) -
     {
         return Err(HeightmapError::HeightRange {
             index,
-            row: index / n,
-            column: index % n,
+            row: index.div_euclid(n),
+            column: index.rem_euclid(n),
             value,
         });
     }
     // n >= 2 and n * n did not overflow, so (n - 1)^2 does not either
-    let cells = (n - 1).saturating_mul(n - 1);
+    let cells = n.saturating_sub(1).saturating_mul(n.saturating_sub(1));
     match holes {
         Some(h) if h.len() != cells => Err(HeightmapError::Holes {
             found: h.len(),

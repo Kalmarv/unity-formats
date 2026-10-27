@@ -47,9 +47,10 @@ pub struct Channel {
 }
 
 impl Channel {
-    /// Vertex `i`'s components. Panics when `i` is not a vertex of the channel.
-    pub fn vertex(&self, i: usize) -> &[f32] {
-        &self.values[i * self.dim..(i + 1) * self.dim]
+    /// Vertex `i`'s components; `None` when `i` is not a vertex of the channel.
+    pub fn vertex(&self, i: usize) -> Option<&[f32]> {
+        let start = i.checked_mul(self.dim)?;
+        self.values.get(start..start.checked_add(self.dim)?)
     }
 }
 
@@ -84,14 +85,16 @@ impl Blend {
     pub fn from_padded(influences: usize, weights: &[[f32; 4]], bones: &[[u32; 4]]) -> Blend {
         let influences = influences.min(4);
         Blend {
-            starts: (0..=weights.len()).map(|v| (v * influences) as u32).collect(),
+            starts: (0..=weights.len())
+                .map(|v| u32::try_from(v.saturating_mul(influences)).unwrap_or(u32::MAX))
+                .collect(),
             weights: weights
                 .iter()
-                .flat_map(|w| w[..influences].iter().copied())
+                .flat_map(|w| w.iter().take(influences).copied())
                 .collect(),
             bones: bones
                 .iter()
-                .flat_map(|b| b[..influences].iter().copied())
+                .flat_map(|b| b.iter().take(influences).copied())
                 .collect(),
         }
     }
@@ -101,17 +104,20 @@ impl Blend {
         self.starts.len().saturating_sub(1)
     }
 
-    /// Vertex `v`'s weights and bone slots.
-    pub fn vertex(&self, v: usize) -> (&[f32], &[u32]) {
-        let range = self.starts[v] as usize..self.starts[v + 1] as usize;
-        (&self.weights[range.clone()], &self.bones[range])
+    /// Vertex `v`'s weights and bone slots; `None` when `v` is not a vertex of the blend or its range is not inside
+    /// the lists.
+    pub fn vertex(&self, v: usize) -> Option<(&[f32], &[u32])> {
+        let start = usize::try_from(*self.starts.get(v)?).ok()?;
+        let end = usize::try_from(*self.starts.get(v.checked_add(1)?)?).ok()?;
+        Some((self.weights.get(start..end)?, self.bones.get(start..end)?))
     }
 
     /// The most influences any vertex has.
     pub fn max_influences(&self) -> usize {
         self.starts
-            .windows(2)
-            .map(|p| (p[1] - p[0]) as usize)
+            .iter()
+            .zip(self.starts.iter().skip(1))
+            .map(|(&a, &b)| usize::try_from(b.saturating_sub(a)).unwrap_or(usize::MAX))
             .max()
             .unwrap_or(0)
     }
@@ -143,7 +149,7 @@ impl MeshSkin {
     fn drawn(&self, limit: SkinWeights) -> (&Blend, usize) {
         match limit {
             SkinWeights::Unlimited => (self.unlimited.as_ref().unwrap_or(&self.channel), usize::MAX),
-            SkinWeights::Bones(n) => (&self.channel, n as usize),
+            SkinWeights::Bones(n) => (&self.channel, usize::try_from(n).unwrap_or(usize::MAX)),
         }
     }
 
@@ -170,19 +176,32 @@ impl MeshSkin {
         let sets = self.sets(limit);
         let mut weights = vec![vec![[0.0f32; 4]; n]; sets];
         let mut bones = vec![vec![[0u32; 4]; n]; sets];
-        let mut cut = 0;
+        let mut cut = 0u64;
         for v in 0..n {
-            let (w, b) = blend.vertex(v);
+            let Some((w, b)) = blend.vertex(v) else { continue };
             let kept = w.len().min(keep);
             let divisor = if kept < w.len() {
-                cut += 1;
-                Some(w[..kept].iter().sum::<f32>()).filter(|sum| *sum > 0.0)
+                cut = cut.saturating_add(1);
+                Some(w.iter().take(kept).sum::<f32>()).filter(|sum| *sum > 0.0)
             } else {
                 None
             };
-            for i in 0..kept {
-                weights[i / 4][v][i % 4] = divisor.map_or(w[i], |sum| w[i] / sum);
-                bones[i / 4][v][i % 4] = b[i];
+            for (i, (&weight, &bone)) in w.iter().zip(b).take(kept).enumerate() {
+                let (set, slot) = (i.div_euclid(4), i.rem_euclid(4));
+                if let Some(x) = weights
+                    .get_mut(set)
+                    .and_then(|s| s.get_mut(v))
+                    .and_then(|q| q.get_mut(slot))
+                {
+                    *x = divisor.map_or(weight, |sum| weight / sum);
+                }
+                if let Some(x) = bones
+                    .get_mut(set)
+                    .and_then(|s| s.get_mut(v))
+                    .and_then(|q| q.get_mut(slot))
+                {
+                    *x = bone;
+                }
             }
         }
         (weights, bones, cut)
@@ -371,7 +390,10 @@ fn read_shapes(m: &Value, name: &str, vertex_count: usize) -> Result<Option<Mesh
                 .get(range.clone())
                 .filter(|own| !own.is_empty())
                 .ok_or_else(|| invalid(format!("{what}: a channel of {} frames", range.len())))?;
-            if !own.windows(2).all(|p| p[0].weight < p[1].weight)
+            if !own
+                .iter()
+                .zip(own.iter().skip(1))
+                .all(|(a, b)| a.weight < b.weight)
                 || own.iter().any(|f| !f.weight.is_finite() || f.weight == 0.0)
             {
                 return Err(Error::Unsupported(format!(
@@ -475,21 +497,40 @@ fn unpack_ints(v: &Value, start: usize, count: usize) -> Result<Vec<u32>> {
         )));
     }
     let mut out = Vec::with_capacity(count);
-    let mut bit = start * bits;
+    // an item starts at `bit` and, with its offset in the first byte, spans at most five bytes
+    let mask = shl(1, bits).saturating_sub(1);
+    let mut bit = start.saturating_mul(bits);
     for _ in 0..count {
-        let mut value = 0u64;
-        let mut got = 0;
-        while got < bits {
-            let (byte, shift) = (bit / 8, bit % 8);
-            let take = (bits - got).min(8 - shift);
-            let part = (u64::from(data[byte]) >> shift) & ((1 << take) - 1);
-            value |= part << got;
-            got += take;
-            bit += take;
-        }
-        out.push(value as u32);
+        let (first, offset) = (bit / 8, bit % 8);
+        let span = offset.saturating_add(bits).div_ceil(8);
+        let window = first
+            .checked_add(span)
+            .and_then(|end| data.get(first..end))
+            .ok_or_else(|| {
+                invalid(format!(
+                    "packed item at bit {bit} of {bits} bits past {} bytes",
+                    data.len()
+                ))
+            })?;
+        let word = window
+            .iter()
+            .enumerate()
+            .fold(0u64, |w, (i, &b)| w | shl(u64::from(b), i.saturating_mul(8)));
+        let value = shr(word, offset) & mask;
+        out.push(u32::try_from(value).unwrap_or(u32::MAX));
+        bit = bit.saturating_add(bits);
     }
     Ok(out)
+}
+
+/// `x << n`, 0 when `n` shifts every bit out.
+fn shl(x: u64, n: usize) -> u64 {
+    u32::try_from(n).ok().and_then(|n| x.checked_shl(n)).unwrap_or(0)
+}
+
+/// `x >> n`, 0 when `n` shifts every bit out.
+fn shr(x: u64, n: usize) -> u64 {
+    u32::try_from(n).ok().and_then(|n| x.checked_shr(n)).unwrap_or(0)
 }
 
 /// A PackedBitVector's items as floats: `start + item * (range / (2^bits - 1))`, in f32.
@@ -515,11 +556,19 @@ fn unpack_floats(v: &Value, start: usize, count: usize) -> Result<Vec<f32>> {
         }
         return Ok(vec![first; count]);
     }
-    let scale = range / ((1u64 << bits) - 1) as f32;
+    let scale = range / shl(1, usize::try_from(bits).unwrap_or(0)).saturating_sub(1) as f32;
     Ok(unpack_ints(v, start, count)?
         .into_iter()
         .map(|x| x as f32 * scale + first)
         .collect())
+}
+
+/// Channel `i` (0 to 11) of a mesh set to `channel`.
+fn set_channel(channels: &mut [Option<Channel>; 12], i: usize, channel: Channel) -> Result<()> {
+    *channels
+        .get_mut(i)
+        .ok_or_else(|| invalid(format!("mesh: channel {i} of 12")))? = Some(channel);
+    Ok(())
 }
 
 fn items(v: &Value) -> Result<usize> {
@@ -562,25 +611,27 @@ fn rebuild_z(x: f32, y: f32, positive: bool) -> [f32; 3] {
 /// 16 bits and the weight in the high 16 (normalised), heaviest first.
 fn read_variable_weights(name: &str, data: &[u32], n: usize) -> Result<Blend> {
     let bad = |why: String| invalid(format!("{name}: variable bone weights: {why}"));
-    if data.len() < n + 1 {
+    let table = n.checked_add(1).ok_or_else(|| bad(format!("{n} vertices")))?;
+    let Some(starts) = data.get(..table) else {
         return Err(bad(format!("{} words for {n} vertices", data.len())));
-    }
-    let starts = &data[..=n];
-    if starts[0] as usize != n + 1
-        || starts[n] as usize != data.len()
-        || starts.windows(2).any(|p| p[1] <= p[0])
+    };
+    let (Some(&first), Some(&last)) = (starts.first(), starts.last()) else {
+        return Err(bad("no start offsets".into()));
+    };
+    if usize::try_from(first) != Ok(table)
+        || usize::try_from(last) != Ok(data.len())
+        || starts.iter().zip(starts.iter().skip(1)).any(|(a, b)| b <= a)
     {
         return Err(bad(
             "start offsets not increasing from the end of the table to the end of the data".into(),
         ));
     }
-    let words = &data[n + 1..];
-    let first = starts[0];
+    let words = data.get(table..).unwrap_or_default();
     Ok(Blend {
-        starts: starts.iter().map(|o| o - first).collect(),
+        starts: starts.iter().map(|o| o.saturating_sub(first)).collect(),
         weights: words
             .iter()
-            .map(|w| f32::from((w >> 16) as u16) / 65535.0)
+            .map(|w| f32::from(u16::try_from(w >> 16).unwrap_or(u16::MAX)) / 65535.0)
             .collect(),
         bones: words.iter().map(|w| w & 0xFFFF).collect(),
     })
@@ -612,13 +663,15 @@ fn bind_poses(m: &Value, name: &str) -> Result<Vec<[[f64; 4]; 4]>> {
 }
 
 /// A blend weight component by Unity's `VertexFormat`: `Float` (0), `Float16` (1), `UNorm8` (2) or `UNorm16` (4).
-fn blend_weight(bytes: &[u8], format: i64) -> f32 {
-    match format {
-        0 => f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-        1 => f16::from_le_bytes([bytes[0], bytes[1]]).to_f32(),
-        2 => f32::from(bytes[0]) / 255.0,
-        _ => f32::from(u16::from_le_bytes([bytes[0], bytes[1]])) / 65535.0,
-    }
+fn blend_weight(bytes: &[u8], format: i64) -> Result<f32> {
+    Ok(match (format, bytes) {
+        (0, &[a, b, c, d, ..]) => f32::from_le_bytes([a, b, c, d]),
+        (1, &[a, b, ..]) => f16::from_le_bytes([a, b]).to_f32(),
+        (2, &[a, ..]) => f32::from(a) / 255.0,
+        (0..=2, _) => return Err(invalid(format!("a blend weight of format {format} cut short"))),
+        (_, &[a, b, ..]) => f32::from(u16::from_le_bytes([a, b])) / 65535.0,
+        _ => return Err(invalid("a blend weight cut short")),
+    })
 }
 
 /// The `BlendWeight` and `BlendIndices` channels (12 and 13) of an uncompressed mesh: the influences stored per
@@ -688,18 +741,21 @@ fn read_skin_channels(
     let index_size = component_size(ifmt)?;
     let mut weights = vec![[0.0f32; 4]; n];
     let mut bones = vec![[0u32; 4]; n];
-    for v in 0..n {
+    for (v, (weight_row, bone_row)) in weights.iter_mut().zip(bones.iter_mut()).enumerate() {
         for k in 0..id {
-            let b = at(is, io, v, k, index_size)?;
-            bones[v][k] = match ifmt {
-                6 => u32::from(b[0]),
-                8 => u32::from(u16::from_le_bytes([b[0], b[1]])),
-                _ => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+            let cut = || invalid(format!("{name}: a blend index of vertex {v} cut short"));
+            let bone = match (ifmt, at(is, io, v, k, index_size)?) {
+                (6, &[a, ..]) => u32::from(a),
+                (8, &[a, b, ..]) => u32::from(u16::from_le_bytes([a, b])),
+                (_, &[a, b, c, d, ..]) => u32::from_le_bytes([a, b, c, d]),
+                _ => return Err(cut()),
             };
-            weights[v][k] = match w {
-                Some((ws, wo, wfmt, _)) => blend_weight(at(ws, wo, v, k, component_size(wfmt)?)?, wfmt),
+            let weight = match w {
+                Some((ws, wo, wfmt, _)) => blend_weight(at(ws, wo, v, k, component_size(wfmt)?)?, wfmt)?,
                 None => 1.0,
             };
+            *bone_row.get_mut(k).ok_or_else(cut)? = bone;
+            *weight_row.get_mut(k).ok_or_else(cut)? = weight;
         }
     }
     Ok(Some((id, weights, bones)))
@@ -761,56 +817,78 @@ impl UnityMeshData {
             let pv = get("m_Vertices")?;
             vertex_count = items(pv)? / 3;
             check_vertices(&name, vertex_count)?;
-            channels[0] = Some(Channel {
-                dim: 3,
-                values: unpack_floats(pv, 0, vertex_count * 3)?,
-            });
+            // vertex_count is at most MAX_VERTICES: the products below stay far from overflow
+            let times = |n: usize| vertex_count.saturating_mul(n);
+            set_channel(
+                &mut channels,
+                0,
+                Channel {
+                    dim: 3,
+                    values: unpack_floats(pv, 0, times(3))?,
+                },
+            )?;
             let uv = get("m_UV")?;
             if items(uv)? > 0 {
                 let info = uint(cm, "m_UVInfo", "compressed mesh")?;
                 if info == 0 {
                     return Err(Error::Unsupported("compressed mesh UVs without UV info".into()));
                 }
-                let mut at = 0;
-                for ch in 0..8 {
-                    let b = (info >> (ch * 4)) & 0xF;
+                let mut at = 0usize;
+                for ch in 0..8u32 {
+                    let b = info.checked_shr(ch.saturating_mul(4)).unwrap_or(0) & 0xF;
                     if b & 4 != 0 {
-                        let dim = 1 + (b & 3) as usize;
-                        channels[4 + ch] = Some(Channel {
-                            dim,
-                            values: unpack_floats(uv, at, vertex_count * dim)?,
-                        });
-                        at += vertex_count * dim;
+                        let dim = usize::try_from(b & 3).unwrap_or(0).saturating_add(1);
+                        set_channel(
+                            &mut channels,
+                            usize::try_from(ch).unwrap_or(0).saturating_add(4),
+                            Channel {
+                                dim,
+                                values: unpack_floats(uv, at, times(dim))?,
+                            },
+                        )?;
+                        at = at.saturating_add(times(dim));
                     }
                 }
             }
             let n = get("m_Normals")?;
             if items(n)? > 0 {
-                let xy = unpack_floats(n, 0, vertex_count * 2)?;
+                let xy = unpack_floats(n, 0, times(2))?;
                 let signs = unpack_ints(get("m_NormalSigns")?, 0, vertex_count)?;
-                let values = (0..vertex_count)
-                    .flat_map(|i| rebuild_z(xy[2 * i], xy[2 * i + 1], signs[i] != 0))
+                let values = xy
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .zip(&signs)
+                    .flat_map(|(&[x, y], &sign)| rebuild_z(x, y, sign != 0))
                     .collect();
-                channels[1] = Some(Channel { dim: 3, values });
+                set_channel(&mut channels, 1, Channel { dim: 3, values })?;
             }
             let t = get("m_Tangents")?;
             if items(t)? > 0 {
-                let xy = unpack_floats(t, 0, vertex_count * 2)?;
-                let signs = unpack_ints(get("m_TangentSigns")?, 0, vertex_count * 2)?;
-                let values = (0..vertex_count)
-                    .flat_map(|i| {
-                        let [x, y, z] = rebuild_z(xy[2 * i], xy[2 * i + 1], signs[2 * i] != 0);
-                        [x, y, z, if signs[2 * i + 1] > 0 { 1.0 } else { -1.0 }]
+                let xy = unpack_floats(t, 0, times(2))?;
+                let signs = unpack_ints(get("m_TangentSigns")?, 0, times(2))?;
+                let values = xy
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .zip(signs.as_chunks::<2>().0)
+                    .flat_map(|(&[x, y], &[z_sign, w_sign])| {
+                        let [x, y, z] = rebuild_z(x, y, z_sign != 0);
+                        [x, y, z, if w_sign > 0 { 1.0 } else { -1.0 }]
                     })
                     .collect();
-                channels[2] = Some(Channel { dim: 4, values });
+                set_channel(&mut channels, 2, Channel { dim: 4, values })?;
             }
             let c = get("m_FloatColors")?;
             if items(c)? > 0 {
-                channels[3] = Some(Channel {
-                    dim: 4,
-                    values: unpack_floats(c, 0, vertex_count * 4)?,
-                });
+                set_channel(
+                    &mut channels,
+                    3,
+                    Channel {
+                        dim: 4,
+                        values: unpack_floats(c, 0, times(4))?,
+                    },
+                )?;
             }
         } else {
             let stated = int(vd, "m_VertexCount")?;
@@ -838,24 +916,31 @@ impl UnityMeshData {
                         stream,
                         non_negative("offset")?,
                         int(c, "format")?,
-                        (int(c, "dimension")? & 0xF) as usize,
+                        usize::try_from(int(c, "dimension")? & 0xF).unwrap_or(0),
                     ))
                 })
                 .collect::<Result<_>>()?;
-            let streams = 1 + info.iter().filter(|c| c.3 > 0).map(|c| c.0).max().unwrap_or(0);
+            let streams = info
+                .iter()
+                .filter(|c| c.3 > 0)
+                .map(|c| c.0)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
             let mut stream_at = Vec::with_capacity(streams);
             let mut offset = 0usize;
             for s in 0..streams {
                 let mut stride = 0;
                 for &(cs, _, f, d) in &info {
                     if cs == s && d > 0 {
-                        stride += d * component_size(f)?;
+                        stride = d.saturating_mul(component_size(f)?).saturating_add(stride);
                     }
                 }
                 stream_at.push((offset, stride));
-                // vertex_count is at most 2^24 and a stride 15 x 4 x 16 channels: no overflow
-                offset += vertex_count * stride;
-                offset = offset.next_multiple_of(16);
+                // vertex_count is at most 2^24 and a stride 15 x 4 x 16 channels: no overflow; were there one, the
+                // saturated size fails the check against the data below
+                offset = offset.saturating_add(vertex_count.saturating_mul(stride));
+                offset = offset.checked_next_multiple_of(16).unwrap_or(usize::MAX);
             }
             let stream_data = m
                 .get("m_StreamData")
@@ -874,7 +959,7 @@ impl UnityMeshData {
             };
             // every stream holds its vertices, so what is allocated per vertex below is backed by the data
             for (s, &(base, stride)) in stream_at.iter().enumerate() {
-                if stride > 0 && base + vertex_count * stride > data.len() {
+                if stride > 0 && base.saturating_add(vertex_count.saturating_mul(stride)) > data.len() {
                     return Err(invalid(format!(
                         "{name}: stream {s} of {vertex_count} vertices of {stride} bytes past the {} bytes of vertex data",
                         data.len()
@@ -886,21 +971,32 @@ impl UnityMeshData {
                 if d == 0 {
                     continue;
                 }
-                let format = vertex_format(f, d).ok_or_else(|| {
-                    Error::Unsupported(format!("{} channel format {f} x {d}", CHANNELS[ch]))
-                })?;
+                let semantic = CHANNELS
+                    .get(ch)
+                    .copied()
+                    .ok_or_else(|| invalid(format!("{name}: channel {ch}")))?;
+                let format = vertex_format(f, d)
+                    .ok_or_else(|| Error::Unsupported(format!("{semantic} channel format {f} x {d}")))?;
                 let layout = resolve_layout(&[Element {
-                    semantic: CHANNELS[ch].to_owned(),
+                    semantic: semantic.to_owned(),
                     index: 0,
                     format,
-                    slot: s as u32,
+                    slot: u32::try_from(s).map_err(|_| invalid(format!("{name}: stream {s}")))?,
                     offset: Some(off),
                 }])
-                .map_err(|e| invalid(format!("{}: {e}", CHANNELS[ch])))?;
-                let (base, stride) = stream_at[s];
+                .map_err(|e| invalid(format!("{semantic}: {e}")))?;
+                let &(base, stride) = stream_at.get(s).ok_or_else(|| {
+                    invalid(format!(
+                        "{name}: {semantic} names stream {s} of {}",
+                        stream_at.len()
+                    ))
+                })?;
+                let element = layout
+                    .first()
+                    .ok_or_else(|| invalid(format!("{name}: no layout for {semantic}")))?;
                 // non-finite values kept as stored: `make_finite` decides by what the stream is
                 let v = decode_stream_raw(
-                    &layout[0],
+                    element,
                     VertexStream {
                         bytes: &data,
                         stride,
@@ -909,21 +1005,25 @@ impl UnityMeshData {
                     0,
                     vertex_count,
                 )
-                .map_err(|e| invalid(format!("{} {}: {e}", name, CHANNELS[ch])))?;
-                channels[ch] = Some(Channel {
-                    dim: d,
-                    values: v.iter().flat_map(|x| x[..d].to_vec()).collect(),
-                });
+                .map_err(|e| invalid(format!("{name} {semantic}: {e}")))?;
+                set_channel(
+                    &mut channels,
+                    ch,
+                    Channel {
+                        dim: d,
+                        values: v.iter().flat_map(|x| x.iter().take(d).copied()).collect(),
+                    },
+                )?;
             }
         }
         // indices
-        let index_size = match int(&m, "m_IndexFormat")? {
-            0 => 2,
-            1 => 4,
+        let (index_size, index_bytes): (u32, usize) = match int(&m, "m_IndexFormat")? {
+            0 => (2, 2),
+            1 => (4, 4),
             f => return Err(invalid(format!("index format {f}"))),
         };
         let ib = bytes(&m, "m_IndexBuffer")?;
-        if ib.len() % index_size as usize != 0 {
+        if ib.len().checked_rem(index_bytes) != Some(0) {
             return Err(invalid(format!("index buffer of {} bytes", ib.len())));
         }
         // a compressed mesh keeps its indices bit-packed (`m_Triangles`); its submeshes still count index bytes
@@ -957,15 +1057,13 @@ impl UnityMeshData {
                     .map(|d| read_variable_weights(&name, d, vertex_count))
                     .transpose()?;
                 for blend in std::iter::once(&channel).chain(&unlimited) {
-                    let bad = blend
-                        .weights
-                        .iter()
-                        .zip(&blend.bones)
-                        .position(|(w, b)| *w > 0.0 && *b as usize >= bind_poses.len());
+                    let bad = blend.weights.iter().zip(&blend.bones).position(|(w, b)| {
+                        *w > 0.0 && usize::try_from(*b).map_or(true, |b| b >= bind_poses.len())
+                    });
                     if let Some(i) = bad {
                         return Err(invalid(format!(
                             "{name}: an influence binds bone {} of {} bind poses",
-                            blend.bones[i],
+                            blend.bones.get(i).copied().unwrap_or_default(),
                             bind_poses.len()
                         )));
                     }
@@ -1143,7 +1241,8 @@ mod tests {
         assert_eq!(b.weights[0], 32768.0 / 65535.0);
         assert_eq!(b.weights[7], 0.0);
         assert_eq!(b.max_influences(), 5);
-        assert_eq!(b.vertex(1).1, &[2, 1, 0]);
+        assert_eq!(b.vertex(1).unwrap().1, &[2, 1, 0]);
+        assert_eq!(b.vertex(9), None);
         let refused = |data: &[u32], n: usize| read_variable_weights("m", data, n).unwrap_err().to_string();
         assert!(refused(&data[..2], 2).contains("words for 2 vertices"));
         let mut bad = data;

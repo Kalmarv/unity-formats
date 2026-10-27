@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use crate::bump;
 use crate::player::{ObjRef, Player};
 use crate::value::{Array, Value};
 use crate::{Result, invalid};
@@ -87,9 +88,13 @@ pub const IDENTITY: Matrix = [
 /// The product `a * b`.
 pub fn mul(a: &Matrix, b: &Matrix) -> Matrix {
     let mut m = [[0.0; 4]; 4];
-    for (i, row) in m.iter_mut().enumerate() {
+    for (row, a_row) in m.iter_mut().zip(a) {
         for (j, x) in row.iter_mut().enumerate() {
-            *x = (0..4).map(|k| a[i][k] * b[k][j]).sum();
+            *x = a_row
+                .iter()
+                .zip(b)
+                .map(|(&av, b_row)| av * b_row.get(j).copied().unwrap_or(0.0))
+                .sum();
         }
     }
     m
@@ -116,11 +121,14 @@ pub fn trs(p: [f64; 3], q: [f64; 4], s: [f64; 3]) -> Matrix {
         ],
     ];
     let mut m = IDENTITY;
-    for i in 0..3 {
-        for j in 0..3 {
-            m[i][j] = r[i][j] * s[j];
+    // the rotation's three rows scaled by column; the fourth row stays (0, 0, 0, 1)
+    for ((row, r_row), &position) in m.iter_mut().zip(&r).zip(&p) {
+        for ((x, &rv), &sv) in row.iter_mut().zip(r_row).zip(&s) {
+            *x = rv * sv;
         }
-        m[i][3] = p[i];
+        if let Some(last) = row.get_mut(3) {
+            *last = position;
+        }
     }
     m
 }
@@ -381,7 +389,7 @@ fn check_depth(nodes: &BTreeMap<i64, Node>) -> Result<()> {
             )));
         }
         for (k, &t) in chain.iter().rev().enumerate() {
-            depths.insert(t, base + k + 1);
+            depths.insert(t, base.saturating_add(k).saturating_add(1));
         }
     }
     Ok(())
@@ -469,7 +477,7 @@ impl Scene {
             );
             let fa = nodes.get(&tp).map_or(0, |n| n.father);
             let (ps, _) = if fa != 0 {
-                rect_size(fa, rects, nodes, sizes, depth + 1)?
+                rect_size(fa, rects, nodes, sizes, depth.saturating_add(1))?
             } else {
                 ([0.0; 2], [0.0; 2])
             };
@@ -485,8 +493,9 @@ impl Scene {
         }
         let rect_ids: Vec<i64> = rects.keys().copied().collect();
         for tp in rect_ids {
-            let t = &rects[&tp];
-            let fa = nodes[&tp].father;
+            let missing = || invalid(format!("RectTransform {tp} is not a transform of the scene"));
+            let t = rects.get(&tp).ok_or_else(missing)?;
+            let fa = nodes.get(&tp).ok_or_else(missing)?.father;
             let (ps, ppiv) = if fa != 0 {
                 rect_size(fa, &rects, &nodes, &mut sizes, 0)?
             } else {
@@ -498,9 +507,19 @@ impl Scene {
                 vec2(t, "m_Pivot")?,
                 vec2(t, "m_AnchoredPosition")?,
             );
-            let n = nodes.get_mut(&tp).expect("a rect is a node");
-            for k in 0..2 {
-                n.local[k][3] = -ppiv[k] * ps[k] + ps[k] * (amin[k] + (amax[k] - amin[k]) * piv[k]) + ap[k];
+            let n = nodes.get_mut(&tp).ok_or_else(missing)?;
+            let anchored = ppiv
+                .iter()
+                .zip(&ps)
+                .zip(&amin)
+                .zip(&amax)
+                .zip(&piv)
+                .zip(&ap)
+                .map(|(((((&pp, &p), &lo), &hi), &pv), &a)| -pp * p + p * (lo + (hi - lo) * pv) + a);
+            for (row, value) in n.local.iter_mut().zip(anchored) {
+                if let Some(x) = row.get_mut(3) {
+                    *x = value;
+                }
             }
         }
         let transform_of = nodes.iter().map(|(&tp, n)| (n.game_object, tp)).collect();
@@ -607,7 +626,11 @@ impl Scene {
         let mut m = base;
         let mut cache = self.world_cache();
         for &t in chain.iter().rev() {
-            m = mul(&m, &self.nodes[&t].local);
+            let node = self
+                .nodes
+                .get(&t)
+                .ok_or_else(|| invalid(format!("transform {t} on the chain of {tp} is not in the scene")))?;
+            m = mul(&m, &node.local);
             cache.insert(t, m);
         }
         Ok(m)
@@ -832,12 +855,10 @@ impl Scene {
             }
             t = n.father;
         }
-        Some(
-            chain
-                .iter()
-                .rev()
-                .fold(IDENTITY, |m, t| mul(&m, &self.nodes[t].local)),
-        )
+        chain
+            .iter()
+            .rev()
+            .try_fold(IDENTITY, |m, t| Some(mul(&m, &self.nodes.get(t)?.local)))
     }
 
     /// The mesh renderers, in the order of the scene's object table, and what was skipped (no transform, no
@@ -914,7 +935,7 @@ impl Scene {
             let mr = player.decode(&r(o.path_id))?;
             let go = path_id(&mr, "m_GameObject")?;
             let Some(tp) = self.transform_of(go) else {
-                *skipped.entry("no transform").or_default() += 1;
+                bump(&mut skipped, "no transform");
                 continue;
             };
             let relative = match root_tp {
@@ -925,7 +946,12 @@ impl Scene {
                 None => None,
             };
             let off = self.off_flags(tp, Some((o.path_id, flag(&mr, "m_Enabled")?)));
-            let g = &self.game_objects[&go];
+            let g = self.game_objects.get(&go).ok_or_else(|| {
+                invalid(format!(
+                    "GameObject {go} of renderer {} is not in the scene",
+                    o.path_id
+                ))
+            })?;
             // a skinned renderer holds its mesh itself; a mesh renderer's is on its MeshFilter
             let filter;
             let mesh_ptr = if skinned {
@@ -933,7 +959,7 @@ impl Scene {
                     .ok_or_else(|| invalid("SkinnedMeshRenderer without m_Mesh"))?
             } else {
                 let Some(&mf) = g.components.iter().find(|&&c| class(c) == "MeshFilter") else {
-                    *skipped.entry("no MeshFilter").or_default() += 1;
+                    bump(&mut skipped, "no MeshFilter");
                     continue;
                 };
                 filter = player.decode(&r(mf))?;
@@ -942,7 +968,7 @@ impl Scene {
                     .ok_or_else(|| invalid("MeshFilter without m_Mesh"))?
             };
             let Some(mesh) = player.resolve(file, mesh_ptr)? else {
-                *skipped.entry("null mesh").or_default() += 1;
+                bump(&mut skipped, "null mesh");
                 continue;
             };
             let materials = values(&mr, "m_Materials")?
@@ -1096,7 +1122,7 @@ impl Scene {
                     radius: fl("m_Radius")?,
                     height: fl("m_Height")?,
                     direction: match c.get("m_Direction").and_then(Value::as_i64).unwrap_or(1) {
-                        d @ 0..=2 => d as usize,
+                        d @ 0..=2 => usize::try_from(d).unwrap_or_default(),
                         d => {
                             return Err(invalid(format!(
                                 "CapsuleCollider {}: m_Direction {d} is not 0, 1 or 2",
@@ -1158,7 +1184,7 @@ impl Scene {
                 let c = settings
                     .get(k)
                     .ok_or_else(|| invalid(format!("{file}: RenderSettings without {k}")))?;
-                Ok([num(c, "r")?, num(c, "g")?, num(c, "b")?, num(c, "a")?].map(|x| x as f32))
+                Ok([num(c, "r")?, num(c, "g")?, num(c, "b")?, num(c, "a")?].map(crate::narrow))
             };
             let ambient = match settings.get("m_AmbientMode").and_then(Value::as_i64) {
                 None => None,
@@ -1202,9 +1228,9 @@ impl Scene {
                         .and_then(Value::as_i64)
                         .ok_or_else(|| invalid(format!("{file}: RenderSettings without m_FogMode")))?,
                     color: rgba("m_FogColor")?,
-                    density: num(&settings, "m_FogDensity")? as f32,
-                    start: num(&settings, "m_LinearFogStart")? as f32,
-                    end: num(&settings, "m_LinearFogEnd")? as f32,
+                    density: crate::narrow(num(&settings, "m_FogDensity")?),
+                    start: crate::narrow(num(&settings, "m_LinearFogStart")?),
+                    end: crate::narrow(num(&settings, "m_LinearFogEnd")?),
                 }),
             };
             found = Some(SceneRenderSettings { sun, ambient, fog });
@@ -1237,7 +1263,7 @@ impl Scene {
                 path: self.path(tp),
                 world: self.world_of(tp)?,
                 kind: int("m_Type").ok_or_else(|| invalid("light: no m_Type"))?,
-                color: [num(c, "r")?, num(c, "g")?, num(c, "b")?, num(c, "a")?].map(|x| x as f32),
+                color: [num(c, "r")?, num(c, "g")?, num(c, "b")?, num(c, "a")?].map(crate::narrow),
                 intensity: fl("m_Intensity").unwrap_or(1.0),
                 range: fl("m_Range").unwrap_or(10.0),
                 spot_angle: fl("m_SpotAngle").unwrap_or(30.0),
@@ -1327,7 +1353,7 @@ impl Scene {
             let t = player.decode(&r(o.path_id))?;
             let go = path_id(&t, "m_GameObject")?;
             let Some(tp) = self.transform_of(go) else {
-                *skipped.entry("no transform").or_default() += 1;
+                bump(&mut skipped, "no transform");
                 continue;
             };
             let off = self.off_flags(tp, Some((o.path_id, flag(&t, "m_Enabled")?)));
@@ -1338,10 +1364,18 @@ impl Scene {
                 }
             };
             let Some(data) = pptr(&t, "m_TerrainData")? else {
-                *skipped.entry("no terrain data").or_default() += 1;
+                bump(&mut skipped, "no terrain data");
                 continue;
             };
-            let collider = match self.game_objects[&go]
+            let collider = match self
+                .game_objects
+                .get(&go)
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "GameObject {go} of terrain {} is not in the scene",
+                        o.path_id
+                    ))
+                })?
                 .components
                 .iter()
                 .find(|&&c| class(c) == "TerrainCollider")
