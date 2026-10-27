@@ -1,13 +1,14 @@
 //! Unity's Animator side as typed data: an Avatar (the skeleton Mecanim animates, and for a humanoid the compiled
 //! muscle axes and the HumanDescription it was built from), an AnimatorController (layers, state machines, states with
-//! their blend trees and transitions, parameters) and the Animator that pairs them with a rig. Nothing here is
+//! their blend trees and transitions, parameters). Nothing here is
 //! evaluated: it is what the files hold, in Unity's frame (rotations as `[x, y, z, w]`), with the names Unity keeps
 //! only as CRC-32 hashes resolved through the object's own name table (`tos`) where it has one.
 
-use primase_core::{Component, Entity, JsonError};
+mod read;
+
 use serde::Serialize;
 
-use crate::components::UnityObject;
+use crate::player::ObjRef;
 
 /// The hash Unity's Animator data names things by (a state, a layer, a parameter, a binding's path): the CRC-32 (the zlib one)
 /// of the name's bytes.
@@ -117,10 +118,10 @@ pub struct HumanDescription {
     pub skeleton_has_parents: bool,
 }
 
-/// `unity.avatar`: an Avatar object as stored, on an entity of its own that the Animators using it name.
+/// An Avatar object as stored: the skeleton Mecanim animates and, for a humanoid, its muscle axes.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UnityAvatar {
-    pub avatar: UnityObject,
+    pub avatar: ObjRef,
     pub name: String,
     pub skeleton: AvatarSkeleton,
     /// The skeleton's pose (`m_AvatarSkeletonPose`) and its default pose (`m_DefaultPose`), a transform a node.
@@ -141,23 +142,6 @@ pub struct UnityAvatar {
     /// The CRC-32 of a path and the path (`m_TOS`).
     pub tos: Vec<(u32, String)>,
     pub description: HumanDescription,
-}
-
-impl Component for UnityAvatar {
-    const NAME: &'static str = "unity.avatar";
-    const GEOMETRY: primase_core::Geometry = primase_core::Geometry::None;
-    fn to_json(&self) -> Result<Option<serde_json::Value>, JsonError> {
-        // the counts, not the poses and tables
-        Ok(Some(serde_json::json!({
-            "avatar": self.avatar,
-            "name": self.name,
-            "nodes": self.skeleton.nodes.len(),
-            "humanoid": self.human.is_some(),
-            "human_bones": self.human.as_ref().map(|h| h.bone_index.iter().filter(|i| **i >= 0).count()),
-            "described_bones": self.description.skeleton.len(),
-            "tos": self.tos.len(),
-        })))
-    }
 }
 
 /// A transition condition (`ConditionConstant`): its mode (1 true, 2 false, 3 greater, 4 less, 6 equals, 7 not equal,
@@ -292,10 +276,10 @@ pub struct Parameter {
     pub index: i64,
 }
 
-/// `unity.animator_controller`: an AnimatorController object as stored (the compiled `ControllerConstant`).
+/// An AnimatorController object as stored (the compiled `ControllerConstant`).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UnityAnimatorController {
-    pub controller: UnityObject,
+    pub controller: ObjRef,
     pub name: String,
     pub layers: Vec<Layer>,
     pub state_machines: Vec<StateMachine>,
@@ -305,9 +289,9 @@ pub struct UnityAnimatorController {
     pub default_bools: Vec<bool>,
     /// The clips the blend trees' leaves index (`m_AnimationClips`): one slot per entry, `None` for a null pointer (a leaf's
     /// index counts it).
-    pub clips: Vec<Option<UnityObject>>,
+    pub clips: Vec<Option<ObjRef>>,
     /// The scripts of the state machine behaviours (`m_StateMachineBehaviours`), by object.
-    pub behaviours: Vec<UnityObject>,
+    pub behaviours: Vec<ObjRef>,
     /// The CRC-32 of a name (a state, path, layer or parameter) and the name (`m_TOS`).
     pub tos: Vec<(u32, String)>,
 }
@@ -316,61 +300,5 @@ impl UnityAnimatorController {
     /// The name a hash stands for in this controller's name table.
     pub fn name_of(&self, hash: u32) -> Option<&str> {
         self.tos.iter().find(|(h, _)| *h == hash).map(|(_, n)| n.as_str())
-    }
-}
-
-impl Component for UnityAnimatorController {
-    const NAME: &'static str = "unity.animator_controller";
-    const GEOMETRY: primase_core::Geometry = primase_core::Geometry::None;
-    fn to_json(&self) -> Result<Option<serde_json::Value>, JsonError> {
-        // the structure by its names: layers with their states and the parameters
-        let layers: Vec<serde_json::Value> = self
-            .layers
-            .iter()
-            .map(|l| {
-                let machine = usize::try_from(l.state_machine)
-                    .ok()
-                    .and_then(|i| self.state_machines.get(i));
-                serde_json::json!({
-                    "name": self.name_of(l.binding),
-                    "weight": l.default_weight,
-                    "states": machine.map(|m| m.states.iter().map(|s| self.name_of(s.name_id)).collect::<Vec<_>>()),
-                })
-            })
-            .collect();
-        Ok(Some(serde_json::json!({
-            "controller": self.controller,
-            "name": self.name,
-            "layers": layers,
-            "parameters": self.parameters.iter().map(|p| serde_json::json!({
-                "name": self.name_of(p.id), "kind": p.kind,
-            })).collect::<Vec<_>>(),
-            "clips": self.clips.len(),
-            "behaviours": self.behaviours.len(),
-        })))
-    }
-}
-
-/// `unity.animator`: an Animator component as stored, on the rig it animates: its object, whether it is enabled and
-/// applies root motion, and the controller and avatar entities (`unity.animator_controller`, `unity.avatar`) it names.
-/// A controller-less Animator has its clips chosen at run time by scripts.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct UnityAnimator {
-    pub animator: UnityObject,
-    pub enabled: bool,
-    pub apply_root_motion: bool,
-    pub controller: Option<Entity>,
-    pub avatar: Option<Entity>,
-}
-
-impl Component for UnityAnimator {
-    const NAME: &'static str = "unity.animator";
-    const GEOMETRY: primase_core::Geometry = primase_core::Geometry::None;
-    fn to_json(&self) -> Result<Option<serde_json::Value>, JsonError> {
-        primase_core::json::to_value(self).map(Some)
-    }
-    fn references(&self, out: &mut Vec<Entity>) {
-        out.extend(self.controller);
-        out.extend(self.avatar);
     }
 }
