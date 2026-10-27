@@ -1,32 +1,10 @@
-//! The reader: a player's data folder, its SerializedFiles decoded by their classes' type trees, the streamed
-//! resources beside them, and the objects read from them.
-
-pub mod animator;
-pub mod asset;
-pub mod clip;
-pub mod convert;
-pub mod level;
-pub mod listing;
-pub mod material;
-pub mod mesh;
-pub mod pipeline;
-pub mod player;
-pub mod program;
-pub mod resource;
-pub mod scene;
-pub mod serialized;
-pub mod terrain;
-pub mod texture;
-pub mod tpk;
-pub mod typetree;
-pub mod value;
-pub mod version;
+//! A bounds-checked cursor over the bytes of a SerializedFile or of a script's serialized fields.
 
 use crate::{Result, invalid};
 
 /// A bounds-checked little- or big-endian reader over a byte slice.
 #[derive(Clone, Debug)]
-pub(crate) struct Reader<'a> {
+pub struct Reader<'a> {
     pub data: &'a [u8],
     pub pos: usize,
     pub big_endian: bool,
