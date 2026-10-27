@@ -18,10 +18,18 @@ pub mod blend_mode {
     pub const DST_COLOR: u8 = 2;
     /// `SrcColor`.
     pub const SRC_COLOR: u8 = 3;
+    /// `OneMinusDstColor`.
+    pub const ONE_MINUS_DST_COLOR: u8 = 4;
     /// `SrcAlpha`.
     pub const SRC_ALPHA: u8 = 5;
     /// `OneMinusSrcColor`.
     pub const ONE_MINUS_SRC_COLOR: u8 = 6;
+    /// `DstAlpha`.
+    pub const DST_ALPHA: u8 = 7;
+    /// `OneMinusDstAlpha`.
+    pub const ONE_MINUS_DST_ALPHA: u8 = 8;
+    /// `SrcAlphaSaturate`.
+    pub const SRC_ALPHA_SATURATE: u8 = 9;
     /// `OneMinusSrcAlpha`.
     pub const ONE_MINUS_SRC_ALPHA: u8 = 10;
     /// The last value, `OneMinusSrcAlpha`.
@@ -115,7 +123,7 @@ pub struct PassState {
 }
 
 /// A shader pass's kind and render state: its `LightMode` tag as stored (Unity upper-cases some: `FORWARDBASE`), the
-/// first render target's blend factors (Unity's `BlendMode`: 0 Zero, 1 One, 5 SrcAlpha, 10 OneMinusSrcAlpha, ...),
+/// first render target's blend factors (Unity's `BlendMode`, [`blend_mode`]: 0 Zero, 1 One, 5 SrcAlpha, 10 OneMinusSrcAlpha, ...),
 /// depth writes and culling (0 off, 1 front, 2 back).
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct ShaderPass {
@@ -142,4 +150,29 @@ pub struct SubShader {
     pub tags: Vec<(String, String)>,
     /// The passes, in order.
     pub passes: Vec<ShaderPass>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::blend_mode::*;
+
+    /// Every `BlendMode` value from 0 to [`LAST`] has a constant, in the order Unity declares them.
+    #[test]
+    fn blend_modes_cover_unitys_eleven_values() {
+        let all = [
+            ZERO,
+            ONE,
+            DST_COLOR,
+            SRC_COLOR,
+            ONE_MINUS_DST_COLOR,
+            SRC_ALPHA,
+            ONE_MINUS_SRC_COLOR,
+            DST_ALPHA,
+            ONE_MINUS_DST_ALPHA,
+            SRC_ALPHA_SATURATE,
+            ONE_MINUS_SRC_ALPHA,
+        ];
+        assert_eq!(all, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(usize::from(LAST) + 1, all.len());
+    }
 }

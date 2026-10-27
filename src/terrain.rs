@@ -14,37 +14,95 @@ use crate::{Result, invalid};
 /// The highest stored height sample: 0..=32766 is 0..1 of the terrain's height (`TerrainData.GetHeight`).
 pub const MAX_HEIGHT: i16 = 32766;
 
+/// Why [`check_heightmap`] refuses a heightmap.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum HeightmapError {
+    /// The resolution leaves no cell.
+    #[error("resolution {resolution}: a heightmap has at least 2 x 2 samples")]
+    Resolution {
+        /// The stated resolution.
+        resolution: u32,
+    },
+    /// The resolution squared does not fit the address space.
+    #[error("resolution {resolution}: the heightmap's sample count overflows")]
+    SampleCount {
+        /// The stated resolution.
+        resolution: u32,
+    },
+    /// The number of height samples is not the resolution squared.
+    #[error("{found} heights for resolution {resolution} ({expected} expected)")]
+    Heights {
+        /// The stated resolution.
+        resolution: u32,
+        /// The samples stored.
+        found: usize,
+        /// The samples the resolution needs.
+        expected: usize,
+    },
+    /// A sample is outside 0..=[`MAX_HEIGHT`].
+    #[error("height sample {index} (row {row}, column {column}) is {value}, outside 0..={MAX_HEIGHT}")]
+    HeightRange {
+        /// The sample's place in the array.
+        index: usize,
+        /// Its row.
+        row: usize,
+        /// Its column.
+        column: usize,
+        /// Its value.
+        value: i16,
+    },
+    /// The number of holes is not the number of cells.
+    #[error("{found} holes for {cells} cells")]
+    Holes {
+        /// The holes stored.
+        found: usize,
+        /// The cells of the heightmap.
+        cells: usize,
+    },
+}
+
+impl From<HeightmapError> for crate::Error {
+    fn from(e: HeightmapError) -> Self {
+        invalid(format!("terrain: {e}"))
+    }
+}
+
 /// What a heightmap must be to be read: `resolution` x `resolution` samples (at least 2 x 2: one cell), each
 /// 0..=[`MAX_HEIGHT`], and, where it has holes, one per cell ((resolution - 1)^2).
-pub fn check_heightmap(
-    resolution: u32,
-    heights: &[i16],
-    holes: Option<&[u8]>,
-) -> std::result::Result<(), String> {
+pub fn check_heightmap(resolution: u32, heights: &[i16], holes: Option<&[u8]>) -> Result<(), HeightmapError> {
     if resolution < 2 {
-        return Err(format!(
-            "resolution {resolution}: a heightmap has at least 2 x 2 samples"
-        ));
+        return Err(HeightmapError::Resolution { resolution });
     }
-    let n = resolution as usize;
-    let samples = n.checked_mul(n).ok_or("the heightmap's sample count overflows")?;
+    let n = usize::try_from(resolution).map_err(|_| HeightmapError::SampleCount { resolution })?;
+    let samples = n
+        .checked_mul(n)
+        .ok_or(HeightmapError::SampleCount { resolution })?;
     if heights.len() != samples {
-        return Err(format!("{} heights for resolution {resolution}", heights.len()));
+        return Err(HeightmapError::Heights {
+            resolution,
+            found: heights.len(),
+            expected: samples,
+        });
     }
-    if let Some((i, h)) = heights
+    if let Some((index, &value)) = heights
         .iter()
         .enumerate()
         .find(|(_, h)| !(0..=MAX_HEIGHT).contains(*h))
     {
-        return Err(format!(
-            "height sample {i} (row {}, column {}) is {h}, outside 0..={MAX_HEIGHT}",
-            i / n,
-            i % n
-        ));
+        return Err(HeightmapError::HeightRange {
+            index,
+            row: index / n,
+            column: index % n,
+            value,
+        });
     }
-    let cells = (n - 1) * (n - 1);
+    // n >= 2 and n * n did not overflow, so (n - 1)^2 does not either
+    let cells = (n - 1).saturating_mul(n - 1);
     match holes {
-        Some(h) if h.len() != cells => Err(format!("{} holes for {cells} cells", h.len())),
+        Some(h) if h.len() != cells => Err(HeightmapError::Holes {
+            found: h.len(),
+            cells,
+        }),
         _ => Ok(()),
     }
 }
@@ -167,6 +225,39 @@ fn pptrs(player: &Player, file: &str, items: &[Value], field: Option<&str>) -> R
         .collect()
 }
 
+/// The tree instances `items` states, each naming one of `prototypes` prototypes and a colour that fits 32 bits.
+fn read_trees(items: &[Value], prototypes: usize) -> Result<Vec<TreeInstance>> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(n, i)| {
+            let index = int(i, "index")?;
+            let prototype = usize::try_from(index)
+                .ok()
+                .filter(|&p| p < prototypes)
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "terrain: tree {n} uses prototype {index} of {prototypes}"
+                    ))
+                })?;
+            let rgba = int(get(i, "color")?, "rgba")?;
+            let color = u32::try_from(rgba).map_err(|_| {
+                invalid(format!(
+                    "terrain: tree {n}: colour {rgba} is not a 32-bit unsigned number"
+                ))
+            })?;
+            Ok(TreeInstance {
+                position: vec(i, "position", ["x", "y", "z"])?,
+                width_scale: float(i, "widthScale")?,
+                height_scale: float(i, "heightScale")?,
+                rotation: float(i, "rotation")?,
+                color,
+                prototype,
+            })
+        })
+        .collect()
+}
+
 impl TerrainData {
     /// Read the TerrainData `r` of `player`, its heightmap as [`check_heightmap`] requires.
     pub fn read(player: &Player, r: &ObjRef) -> Result<Self> {
@@ -186,23 +277,17 @@ impl TerrainData {
             }
             _ => None,
         };
-        check_heightmap(resolution, &heights, holes.as_deref())
-            .map_err(|e| invalid(format!("terrain: {e}")))?;
+        check_heightmap(resolution, &heights, holes.as_deref())?;
         let splat = get(&t, "m_SplatDatabase")?;
         let detail = get(&t, "m_DetailDatabase")?;
-        let trees = list(detail, "m_TreeInstances")?
-            .iter()
-            .map(|i| {
-                Ok(TreeInstance {
-                    position: vec(i, "position", ["x", "y", "z"])?,
-                    width_scale: float(i, "widthScale")?,
-                    height_scale: float(i, "heightScale")?,
-                    rotation: float(i, "rotation")?,
-                    color: int(get(i, "color")?, "rgba")? as u32,
-                    prototype: int(i, "index")? as usize,
-                })
-            })
-            .collect::<Result<_>>()?;
+        let prototypes = list(detail, "m_TreePrototypes")?;
+        let trees = read_trees(list(detail, "m_TreeInstances")?, prototypes.len())?;
+        let alphamap_resolution = int(splat, "m_AlphamapResolution")?;
+        let alphamap_resolution = u32::try_from(alphamap_resolution).map_err(|_| {
+            invalid(format!(
+                "terrain: m_AlphamapResolution {alphamap_resolution} is not a 32-bit unsigned number"
+            ))
+        })?;
         Ok(TerrainData {
             name: t.get("m_Name").and_then(Value::as_str).unwrap_or("").to_owned(),
             resolution,
@@ -211,20 +296,26 @@ impl TerrainData {
             holes,
             layers: pptrs(player, &r.file, list(splat, "m_TerrainLayers")?, None)?,
             alphamaps: pptrs(player, &r.file, list(splat, "m_AlphaTextures")?, None)?,
-            alphamap_resolution: int(splat, "m_AlphamapResolution")? as u32,
-            tree_prototypes: pptrs(player, &r.file, list(detail, "m_TreePrototypes")?, Some("prefab"))?,
+            alphamap_resolution,
+            tree_prototypes: pptrs(player, &r.file, prototypes, Some("prefab"))?,
             trees,
         })
     }
 
-    /// The height of sample (x, z) in metres above the terrain's position.
-    pub fn height(&self, x: usize, z: usize) -> f64 {
-        f64::from(self.heights[z * self.resolution as usize + x]) / 32766.0 * f64::from(self.scale[1])
+    /// The height of sample (x, z) in metres above the terrain's position; `None` when (x, z) is not a sample of the
+    /// heightmap.
+    pub fn height(&self, x: usize, z: usize) -> Option<f64> {
+        let side = usize::try_from(self.resolution).ok()?;
+        if x >= side || z >= side {
+            return None;
+        }
+        let sample = self.heights.get(z.checked_mul(side)?.checked_add(x)?)?;
+        Some(f64::from(*sample) / f64::from(MAX_HEIGHT) * f64::from(self.scale[1]))
     }
 
     /// The terrain's size in metres: (resolution - 1) * scale along x and z, scale.y high.
     pub fn size(&self) -> [f64; 3] {
-        let cells = f64::from(self.resolution - 1);
+        let cells = f64::from(self.resolution.saturating_sub(1));
         [
             cells * f64::from(self.scale[0]),
             f64::from(self.scale[1]),
@@ -280,21 +371,104 @@ mod tests {
         for resolution in [0, 1] {
             assert_eq!(
                 check_heightmap(resolution, &[], Some(&[])).unwrap_err(),
-                format!("resolution {resolution}: a heightmap has at least 2 x 2 samples")
+                HeightmapError::Resolution { resolution }
             );
         }
         assert_eq!(
             check_heightmap(2, &[0; 3], None).unwrap_err(),
-            "3 heights for resolution 2"
+            HeightmapError::Heights {
+                resolution: 2,
+                found: 3,
+                expected: 4
+            }
+        );
+        let range = check_heightmap(2, &[0, 0, -1, 0], None).unwrap_err();
+        assert_eq!(
+            range,
+            HeightmapError::HeightRange {
+                index: 2,
+                row: 1,
+                column: 0,
+                value: -1
+            }
         );
         assert_eq!(
-            check_heightmap(2, &[0, 0, -1, 0], None).unwrap_err(),
+            range.to_string(),
             "height sample 2 (row 1, column 0) is -1, outside 0..=32766"
         );
         assert!(check_heightmap(2, &[0, 0, 0, i16::MAX], None).is_err());
+        let holes = check_heightmap(3, &[0; 9], Some(&[1; 3])).unwrap_err();
+        assert_eq!(holes, HeightmapError::Holes { found: 3, cells: 4 });
+        assert_eq!(holes.to_string(), "3 holes for 4 cells");
+        // the typed error becomes the crate's refusal
+        let e = crate::Error::from(holes);
+        assert!(matches!(e, crate::Error::Invalid(m) if m == "terrain: 3 holes for 4 cells"));
+    }
+
+    fn terrain(resolution: u32, heights: Vec<i16>, scale_y: f32) -> TerrainData {
+        TerrainData {
+            name: String::new(),
+            resolution,
+            scale: [1.0, scale_y, 1.0],
+            heights,
+            holes: None,
+            layers: vec![],
+            alphamaps: vec![],
+            alphamap_resolution: 0,
+            tree_prototypes: vec![],
+            trees: vec![],
+        }
+    }
+
+    /// A sample is the stored height over [`MAX_HEIGHT`] of the terrain's height; a sample outside the heightmap is
+    /// `None`, also where `z * resolution + x` would land in the next row.
+    #[test]
+    fn heights_are_scaled_by_max_height_and_bounded() {
+        let t = terrain(2, vec![0, MAX_HEIGHT, 16383, 0], 100.0);
+        assert_eq!(t.height(1, 0), Some(100.0));
         assert_eq!(
-            check_heightmap(3, &[0; 9], Some(&[1; 3])).unwrap_err(),
-            "3 holes for 4 cells"
+            t.height(0, 1),
+            Some(f64::from(16383) / f64::from(MAX_HEIGHT) * 100.0)
         );
+        assert_eq!(t.height(2, 0), None);
+        assert_eq!(t.height(0, 2), None);
+        assert_eq!(t.height(usize::MAX, usize::MAX), None);
+        assert_eq!(terrain(0, vec![], 1.0).size(), [0.0, 1.0, 0.0]);
+    }
+
+    fn tree(index: i64, rgba: i64) -> Value {
+        let f = |k: &str, v: Value| (std::sync::Arc::<str>::from(k), v);
+        let v3 = Value::Struct(vec![
+            f("x", Value::Float(0.5)),
+            f("y", Value::Float(0.0)),
+            f("z", Value::Float(0.5)),
+        ]);
+        Value::Struct(vec![
+            f("position", v3),
+            f("widthScale", Value::Float(1.0)),
+            f("heightScale", Value::Float(1.0)),
+            f("rotation", Value::Float(0.0)),
+            f("color", Value::Struct(vec![f("rgba", Value::Int(rgba))])),
+            f("index", Value::Int(index)),
+        ])
+    }
+
+    /// A tree's prototype must be one of the prototypes and its colour fit 32 bits: neither is cast to fit.
+    #[test]
+    fn trees_name_a_prototype_and_a_colour_that_exist() {
+        let ok = read_trees(&[tree(1, 0xff00_ff00)], 2).unwrap();
+        assert_eq!((ok[0].prototype, ok[0].color), (1, 0xff00_ff00));
+        for (index, rgba, wants) in [
+            (2, 0, "tree 1 uses prototype 2 of 2"),
+            (-1, 0, "tree 1 uses prototype -1 of 2"),
+            (i64::MAX, 0, "prototype 9223372036854775807 of 2"),
+            (0, 1 << 32, "colour 4294967296"),
+            (0, -1, "colour -1"),
+        ] {
+            let e = read_trees(&[tree(0, 0), tree(index, rgba)], 2)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(wants), "{e}");
+        }
     }
 }
