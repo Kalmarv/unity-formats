@@ -2,7 +2,7 @@
 
 A Rust library that reads the data files of Unity games: the SerializedFiles a built player keeps its scenes and assets in, and the meshes, textures, materials, shader programs, terrains and animation data inside them.
 
-It reads SerializedFile containers (versions 21 and 22), decodes their objects through a type tree package (a TPK file you supply, because a player build strips the type trees), and follows pointers across a player's files and streamed `.resS` data. On top of that it reads scenes (GameObjects, Transforms composed to world matrices, renderers, lights, cameras, colliders, terrains, ambient and fog settings), meshes (vertex streams, compressed meshes, skins, blend shapes), `Texture2D` pixels and mip chains, materials, a Shader's render state and compiled program variants, terrains, Avatars, AnimatorControllers and AnimationClips, and the lighting settings of a Universal Render Pipeline asset. It was written against Unity 2019.4 and Unity 6 players: SkateBIRD (2019.4.20f1), Sledding Game (6000.3.12f1) and PEAK. Used by [primase](https://github.com/Kalmarv/primase), a game-asset conversion library.
+It reads SerializedFile containers (versions 21 and 22), decodes their objects through a type tree package (a TPK file you supply, because a player build strips the type trees), and follows pointers across a player's files and streamed `.resS` data. On top of that it reads scenes (GameObjects, Transforms composed to world matrices, renderers, lights, cameras, colliders, terrains, ambient and fog settings), meshes (vertex streams, compressed meshes, skins, blend shapes), `Texture2D` pixels and mip chains, materials, a Shader's render state and compiled program variants, terrains, Avatars, AnimatorControllers and AnimationClips, and the lighting settings of a Universal Render Pipeline asset. It was written against Unity 2019.4 and Unity 6 players: SkateBIRD (2019.4.20f1), Sledding Game (6000.3.12f1) and PEAK.
 
 ## Example
 
@@ -30,10 +30,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## What it guarantees
 
-- Reads are bounds-checked and a file it does not understand is refused with an `Error` that says what it found, for example `SerializedFile version 19 (read: 21..=22)`, `header file size 9758532, file has 30 bytes` or `<n> bytes wanted at offset <p>, <m> left`. Only SerializedFile versions checked against real files are read; anything else is `Error::Unsupported`, never a guess.
-- The container, type package and type tree decoders check every length and index against the bytes there are before they allocate for it. Running them over thousands of randomly corrupted copies of SkateBIRD's files and of a type tree package produced no panic; that is a test run, not a proof.
+- Reads are bounds-checked, and a file it does not understand is refused with an `Error` that says what it found, for example `SerializedFile version 19 (read: 21..=22)`, `header file size 9758532, file has 30 bytes` or `<n> bytes wanted at offset <p>, <m> left`. Only SerializedFile versions checked against real files are read; anything else is `Error::Unsupported`, never a guess.
+- Library code denies, by lint, panicking indexing, unchecked arithmetic and truncating casts, so a malformed file is an `Error` and not a panic. The test suite checks truncated headers and unsupported versions on synthetic bytes; it does not fuzz.
 - What a reader returns is what the file stores: values keep their stored units and Unity's coordinate frame (no handedness change, resampling or colour-space change), and pixels stay as stored. Where a module substitutes a default for a field the file may omit, its docs say so.
-- The library never writes to disk. It reads only the files in the folder it is given (a player's data folder and its `Resources` folder) and the `.resS` files its objects name there; a streamed resource's path cannot leave that folder. `unsafe` code is denied.
+- The library never writes to disk. It reads only the files in the folder it is given (a player's data folder and its `Resources` folder) and the `.resS` files its objects name there; a streamed resource's path is reduced to a file name in that folder. `unsafe` code is denied.
 
 ## What it does not do
 
@@ -66,6 +66,8 @@ require = 'gate'                        # optional: a missing input fails instea
 The one real-data test, `tests/serialized_census.rs`, parses every SerializedFile in SkateBIRD's data folder and compares each file's object table (path ids, class ids, offsets, sizes) with a census made by [UnityPy](https://github.com/K0lb3/UnityPy). Make the census from your own install with `pip install UnityPy` and `python tests/oracles/unitypy_census.py <SkateBIRD_Data folder> <oracles root>/unitypy/skatebird/census.json`. [tests/inputs/README.md](tests/inputs/README.md) lists every input the tests can read (generated from `tests/inputs/mod.rs`).
 
 CONTRIBUTING.md says how to build, and how to report a file this library cannot read.
+
+The asset-conversion library [primase](https://github.com/Kalmarv/primase) is built on this crate.
 
 ## License
 

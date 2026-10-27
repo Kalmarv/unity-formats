@@ -1412,18 +1412,37 @@ impl Scene {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ColliderShape {
     /// A box collider.
-    Box { center: [f64; 3], size: [f64; 3] },
-    /// A sphere collider.
-    Sphere { center: [f64; 3], radius: f64 },
-    /// `direction`: the axis its height runs along (0 x, 1 y, 2 z); `height` includes the caps.
-    Capsule {
+    Box {
+        /// `m_Center`: the box's centre in its GameObject's space.
         center: [f64; 3],
+        /// `m_Size`: the full edge lengths along x, y and z (not half-extents), before the GameObject's scale.
+        size: [f64; 3],
+    },
+    /// A sphere collider.
+    Sphere {
+        /// `m_Center`: the sphere's centre in its GameObject's space.
+        center: [f64; 3],
+        /// `m_Radius`, before the GameObject's scale.
         radius: f64,
+    },
+    /// A capsule collider.
+    Capsule {
+        /// `m_Center`: the capsule's centre in its GameObject's space.
+        center: [f64; 3],
+        /// `m_Radius`, before the GameObject's scale.
+        radius: f64,
+        /// `m_Height`, including the caps, before the GameObject's scale.
         height: f64,
+        /// `m_Direction`: the axis the height runs along (0 x, 1 y, 2 z).
         direction: usize,
     },
-    /// A mesh collider: its mesh (`None` for a null pointer) and whether it is convex.
-    Mesh { mesh: Option<ObjRef>, convex: bool },
+    /// A mesh collider.
+    Mesh {
+        /// `m_Mesh`; `None` for a null pointer.
+        mesh: Option<ObjRef>,
+        /// `m_Convex`.
+        convex: bool,
+    },
 }
 
 /// A collider as stored: its shape, its off flags, whether it is a trigger, its physic material, and the Rigidbody on
@@ -1507,7 +1526,9 @@ pub struct CameraComponent {
     pub path: String,
     /// Its GameObject's world matrix.
     pub world: Matrix,
+    /// `m_CullingMask.m_Bits`: bit n set draws layer n (all 32 bits when not stored).
     pub culling_mask: u32,
+    /// `m_TargetTexture`; `None` when it draws to the screen.
     pub target_texture: Option<ObjRef>,
     /// What keeps it from drawing; draws when empty.
     pub off: Vec<OffFlag>,

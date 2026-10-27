@@ -52,7 +52,7 @@
 //!
 //! Reads are bounds-checked, and a file the readers do not understand is refused with an [`Error`] that names what
 //! was found and where.
-#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+#![deny(clippy::disallowed_methods, clippy::disallowed_types, missing_docs)]
 // Every module reads stored bytes (the files themselves, or values decoded from them), so a panic is a defect: indexes
 // are `get`s, sums are checked or saturating, and numbers are narrowed with `try_from`. Tests index freely.
 #![cfg_attr(

@@ -41,10 +41,16 @@ pub struct Field {
 /// A field's shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum Shape {
-    /// A vector of this many lanes.
-    Vector { columns: u32 },
-    /// A matrix of this many rows.
-    Matrix { rows: u32 },
+    /// A vector.
+    Vector {
+        /// Its lane count (the stored column count: 2 to 4).
+        columns: u32,
+    },
+    /// A matrix.
+    Matrix {
+        /// Its row count as stored.
+        rows: u32,
+    },
 }
 
 /// A constant-buffer field of a struct type (Unity's instancing arrays): its name, byte offset, array size (0: not
