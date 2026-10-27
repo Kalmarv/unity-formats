@@ -152,20 +152,26 @@ fn serialized_type(r: &mut Reader, reference: bool) -> Result<SerializedType> {
 impl SerializedFile {
     /// Whether `bytes` start like a SerializedFile of a supported version (to tell them from other files).
     pub fn looks_like(bytes: &[u8]) -> bool {
-        if bytes.len() < 20 {
+        let be = |at: usize| -> Option<u32> {
+            Some(u32::from_be_bytes(
+                bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
+            ))
+        };
+        let Ok(len) = u64::try_from(bytes.len()) else {
             return false;
-        }
-        let be = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().expect("4"));
-        match be(8) {
-            21 => {
-                let size = u64::from(be(4));
-                let end = 20 + u64::from(be(0));
-                let offset = u64::from(be(12));
-                be(0) > 0 && size == bytes.len() as u64 && end <= offset && offset <= size
-            }
-            22 => bytes.len() >= 48 && bytes[..4] == [0; 4],
-            _ => false,
-        }
+        };
+        let check = || -> Option<bool> {
+            Some(match be(8)? {
+                21 => {
+                    let end = 20u64.checked_add(u64::from(be(0)?))?;
+                    let (size, offset) = (u64::from(be(4)?), u64::from(be(12)?));
+                    be(0)? > 0 && size == len && end <= offset && offset <= size
+                }
+                22 => len >= 48 && be(0)? == 0,
+                _ => false,
+            })
+        };
+        check().unwrap_or(false)
     }
 
     /// The container version of `bytes` when they are a SerializedFile of any version, supported or not: a supported
@@ -173,8 +179,11 @@ impl SerializedFile {
     /// only when the header's own size fields agree with `bytes.len()`, so that other files (streamed resources,
     /// configs) are not taken for one. `None` for bytes that are no SerializedFile.
     pub fn container_version(bytes: &[u8]) -> Option<u32> {
-        let be =
-            |at: usize| -> Option<u32> { Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?)) };
+        let be = |at: usize| -> Option<u32> {
+            Some(u32::from_be_bytes(
+                bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
+            ))
+        };
         let len = u64::try_from(bytes.len()).ok()?;
         let version = be(8)?;
         if VERSIONS.contains(&version) {
@@ -236,7 +245,13 @@ impl SerializedFile {
                 "metadata ends at {meta_end}, data at {data_offset}, file size {file_size}"
             )));
         }
-        let mut r = Reader::new(&data[..meta_end], big_endian);
+        let metadata = data.get(..meta_end).ok_or_else(|| {
+            invalid(format!(
+                "metadata ends at {meta_end}, past the file's {} bytes",
+                data.len()
+            ))
+        })?;
+        let mut r = Reader::new(metadata, big_endian);
         r.pos = h.pos;
         let unity_version = r.cstr()?;
         let unity = UnityVersion::parse(&unity_version)?;
@@ -328,26 +343,44 @@ impl SerializedFile {
 
     /// The object with this path id, if the file has one.
     pub fn object(&self, path_id: i64) -> Option<&ObjectInfo> {
-        self.by_path_id.get(&path_id).map(|&i| &self.objects[i])
+        self.by_path_id.get(&path_id).and_then(|&i| self.objects.get(i))
     }
 
-    /// The bytes of an object of this file. `o` must come from this file's own [`SerializedFile::objects`] (an
-    /// [`ObjectInfo`] of another file may name bytes outside this one, and panics).
-    pub fn bytes(&self, o: &ObjectInfo) -> &[u8] {
-        &self.data[o.offset as usize..o.offset as usize + o.size as usize]
+    /// The bytes of an object of this file. `o` should come from this file's own [`SerializedFile::objects`]: an
+    /// [`ObjectInfo`] of another file that names bytes outside this one is an error naming the object and its range.
+    pub fn bytes(&self, o: &ObjectInfo) -> Result<&[u8]> {
+        let outside = || {
+            invalid(format!(
+                "object {}: bytes {}+{} are outside the file's {} bytes",
+                o.path_id,
+                o.offset,
+                o.size,
+                self.data.len()
+            ))
+        };
+        let start = usize::try_from(o.offset).map_err(|_| outside())?;
+        let end = start
+            .checked_add(usize::try_from(o.size).map_err(|_| outside())?)
+            .ok_or_else(outside)?;
+        self.data.get(start..end).ok_or_else(outside)
     }
 
     /// Decode an object's bytes from its start with `tree` (its class's type tree), reporting the bytes after what the
     /// tree covers in [`Decoded::rest`] (see [`Decoded::covered`]).
     pub fn decode_with(&self, o: &ObjectInfo, tree: &TypeTree) -> Result<Decoded> {
-        let bytes = self.bytes(o);
+        let bytes = self.bytes(o)?;
         let (value, used) = tree
             .decode(bytes, self.big_endian)
             .map_err(|e| invalid(format!("object {} (class {}): {e}", o.path_id, o.class_id)))?;
-        Ok(Decoded {
-            value,
-            rest: bytes.len() - used,
-        })
+        let rest = bytes.len().checked_sub(used).ok_or_else(|| {
+            invalid(format!(
+                "object {} (class {}): decoded {used} of {} bytes",
+                o.path_id,
+                o.class_id,
+                bytes.len()
+            ))
+        })?;
+        Ok(Decoded { value, rest })
     }
 
     /// Decode an object with its class's type tree from `package`. The tree must cover the object's bytes, but for a

@@ -31,33 +31,42 @@ impl UnityVersion {
         let minor: u16 = parts.next().and_then(|p| p.parse().ok()).ok_or_else(bad)?;
         let rest = parts.next().ok_or_else(bad)?;
         let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
-        let build: u16 = rest[..digits].parse().map_err(|_| bad())?;
-        let tail = &rest[digits..];
+        let build: u16 = rest.get(..digits).and_then(|d| d.parse().ok()).ok_or_else(bad)?;
+        let tail = rest.get(digits..).ok_or_else(bad)?;
         let Some(t) = tail.chars().next() else {
             return Ok(Self::new(major, minor, build, 3, 0));
         };
-        let kind = TYPES.iter().position(|&c| c == t).ok_or_else(bad)? as u8;
-        let num = &tail[1..];
+        let kind = TYPES
+            .iter()
+            .position(|&c| c == t)
+            .and_then(|k| u8::try_from(k).ok())
+            .ok_or_else(bad)?;
+        let num = tail.get(t.len_utf8()..).ok_or_else(bad)?;
         let n = num.find(|c: char| !c.is_ascii_digit()).unwrap_or(num.len());
         let number: u8 = if n == 0 {
             0
         } else {
-            num[..n].parse().map_err(|_| bad())?
+            num.get(..n).and_then(|d| d.parse().ok()).ok_or_else(bad)?
         };
         Ok(Self::new(major, minor, build, kind, number))
     }
 
+    /// The 16 bits at bit `shift`.
+    fn field(self, shift: u32) -> u16 {
+        u16::try_from((self.0 >> shift) & 0xFFFF).unwrap_or_default()
+    }
+
     /// The major version (`6000`, `2019`).
     pub fn major(self) -> u16 {
-        (self.0 >> 48) as u16
+        self.field(48)
     }
     /// The minor version.
     pub fn minor(self) -> u16 {
-        (self.0 >> 32) as u16
+        self.field(32)
     }
     /// The build number (`12` of `6000.3.12f1`).
     pub fn build(self) -> u16 {
-        (self.0 >> 16) as u16
+        self.field(16)
     }
 }
 

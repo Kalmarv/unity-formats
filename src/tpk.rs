@@ -61,13 +61,24 @@ fn varint_string(r: &mut Reader) -> Result<Arc<str>> {
             return Err(invalid("TPK: string length varint too long"));
         }
         len |= usize::from(b & 0x7F) << shift;
-        shift += 7;
+        shift = shift.saturating_add(7);
         if b & 0x80 == 0 {
             break;
         }
     }
     let s = std::str::from_utf8(r.take(len)?).map_err(|_| invalid("TPK: string not UTF-8"))?;
     Ok(Arc::from(s))
+}
+
+/// Skip `n` entries of `size` bytes each.
+fn skip(r: &mut Reader, n: usize, size: usize, what: &str) -> Result<()> {
+    let bytes = n.checked_mul(size).ok_or_else(|| {
+        invalid(format!(
+            "TPK: {n} {what} entries of {size} bytes at offset {}",
+            r.pos
+        ))
+    })?;
+    r.take(bytes).map(|_| ())
 }
 
 fn count(r: &mut Reader, what: &str) -> Result<usize> {
@@ -142,7 +153,7 @@ impl TypeTreePackage {
         let mut r = Reader::new(blob, false);
         let _created = r.i64()?;
         let versions = count(&mut r, "version")?;
-        r.take(versions * 8)?;
+        skip(&mut r, versions, 8, "version")?;
         let mut classes = BTreeMap::new();
         for _ in 0..count(&mut r, "class")? {
             let id = r.i32()?;
@@ -177,15 +188,15 @@ impl TypeTreePackage {
         match format {
             1 => {
                 let n = count(&mut r, "common string version")?;
-                r.take(n * 9)?;
+                skip(&mut r, n, 9, "common string version")?;
                 let n = count(&mut r, "common string index")?;
-                r.take(n * 2)?;
+                skip(&mut r, n, 2, "common string index")?;
             }
             _ => {
                 for _ in 0..count(&mut r, "common string version")? {
                     r.u64()?;
                     let n = count(&mut r, "common string entry")?;
-                    r.take(n * 4)?;
+                    skip(&mut r, n, 4, "common string entry")?;
                 }
             }
         }
@@ -257,7 +268,8 @@ impl TypeTreePackage {
     /// The class's name in that Unity version.
     pub fn class_name(&self, class_id: i32, version: UnityVersion) -> Option<&str> {
         self.class(class_id, version)
-            .map(|c| &*self.strings[usize::from(c.name)])
+            .and_then(|c| self.strings.get(usize::from(c.name)))
+            .map(|s| &**s)
     }
 
     /// The class's release (player) type tree in that Unity version.
@@ -270,7 +282,7 @@ impl TypeTreePackage {
         let root = class.release_root.ok_or_else(|| {
             invalid(format!(
                 "class {class_id} ({}) has no release type tree in {version} (flags {:#x})",
-                self.strings[usize::from(class.name)],
+                self.strings.get(usize::from(class.name)).map_or("?", |s| &**s),
                 class.flags
             ))
         })?;
@@ -287,19 +299,32 @@ impl TypeTreePackage {
                     "TPK: a type tree of more than {MAX_TREE_NODES} nodes"
                 )));
             }
-            let p = &pkg.nodes[usize::from(id)];
+            let p = pkg
+                .nodes
+                .get(usize::from(id))
+                .ok_or_else(|| invalid(format!("TPK: node {id} of {}", pkg.nodes.len())))?;
+            let string = |i: u16| {
+                pkg.strings
+                    .get(usize::from(i))
+                    .cloned()
+                    .ok_or_else(|| invalid(format!("TPK: string {i} of {}", pkg.strings.len())))
+            };
             let at = nodes.len();
             nodes.push(Node {
-                ty: pkg.strings[usize::from(p.type_name)].clone(),
-                name: pkg.strings[usize::from(p.name)].clone(),
+                ty: string(p.type_name)?,
+                name: string(p.name)?,
                 byte_size: p.byte_size,
                 version: i32::from(p.version),
                 meta_flag: p.meta_flag,
                 children: Vec::new(),
             });
             for &c in &p.children {
-                let ci = add(pkg, c, depth + 1, nodes)?;
-                nodes[at].children.push(ci);
+                let ci = add(pkg, c, depth.saturating_add(1), nodes)?;
+                nodes
+                    .get_mut(at)
+                    .ok_or_else(|| invalid("TPK: a type tree node went missing"))?
+                    .children
+                    .push(ci);
             }
             Ok(at)
         }

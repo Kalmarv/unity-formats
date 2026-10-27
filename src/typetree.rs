@@ -119,7 +119,7 @@ impl TypeTree {
             if n.children.iter().any(|&c| c <= i || c >= nodes.len()) {
                 return Err(invalid(format!("type tree node {i} has a bad child index")));
             }
-            let first = n.children.first().map(|&c| &nodes[c]);
+            let first = n.children.first().and_then(|&c| nodes.get(c));
             let kind = if let Some(p) = Prim::of(&n.ty) {
                 Kind::Prim(p)
             } else if &*n.ty == "string" {
@@ -137,15 +137,15 @@ impl TypeTree {
             } else if &*n.ty == "ReferencedObject" {
                 Kind::Referenced
             } else if let Some(a) = first.filter(|f| &*f.ty == "Array") {
-                let ac = n.children[0];
-                if a.children.len() != 2 {
+                let &[_, element] = a.children.as_slice() else {
                     return Err(invalid(format!(
-                        "Array node {ac} has {} children",
+                        "Array node {} has {} children",
+                        n.children.first().copied().unwrap_or_default(),
                         a.children.len()
                     )));
-                }
+                };
                 Kind::Vector {
-                    element: a.children[1],
+                    element,
                     aligned: a.meta_flag & ALIGN != 0,
                 }
             } else {
@@ -155,17 +155,20 @@ impl TypeTree {
         }
         // children come after their parent, so the sizes are summed from the last node up
         let mut min_sizes = vec![0usize; nodes.len()];
-        for i in (0..nodes.len()).rev() {
-            min_sizes[i] = match &kinds[i] {
+        for (i, (node, kind)) in nodes.iter().zip(&kinds).enumerate().rev() {
+            let size = match kind {
                 Kind::Prim(p) => p.size(),
                 Kind::String | Kind::Typeless | Kind::Vector { .. } => 4,
-                Kind::Pair | Kind::Struct => nodes[i]
+                Kind::Pair | Kind::Struct => node
                     .children
                     .iter()
-                    .map(|&c| min_sizes[c])
+                    .map(|&c| min_sizes.get(c).copied().unwrap_or(0))
                     .fold(0, usize::saturating_add),
                 Kind::Referenced => 0,
             };
+            if let Some(slot) = min_sizes.get_mut(i) {
+                *slot = size;
+            }
         }
         Ok(TypeTree {
             nodes,
@@ -174,9 +177,17 @@ impl TypeTree {
         })
     }
 
-    /// The root node.
-    pub fn root(&self) -> &Node {
-        &self.nodes[0]
+    /// The root node; `None` only when [`TypeTree::nodes`] was emptied after [`TypeTree::new`] refused an empty tree.
+    pub fn root(&self) -> Option<&Node> {
+        self.nodes.first()
+    }
+
+    /// Node `i` and its kind: an error when the tree no longer holds the node (`nodes` is public, `new` checked it).
+    fn node(&self, i: usize) -> Result<(&Node, &Kind)> {
+        self.nodes
+            .get(i)
+            .zip(self.kinds.get(i))
+            .ok_or_else(|| invalid(format!("type tree node {i} of {}", self.nodes.len())))
     }
 
     /// Decode `data` (an object's bytes) from its start; returns the value and the bytes consumed.
@@ -190,13 +201,14 @@ impl TypeTree {
     /// are not read, so a name stored first costs a few bytes whatever the object holds. `None` when the root has no
     /// such field; the value is what [`TypeTree::decode`] gives it. A root that is not a struct has no fields.
     pub fn decode_field(&self, data: &[u8], big_endian: bool, name: &str) -> Result<Option<Value>> {
-        if !matches!(self.kinds[0], Kind::Struct) {
+        let (root, kind) = self.node(0)?;
+        if !matches!(kind, Kind::Struct) {
             return Ok(None);
         }
         let mut r = Reader::new(data, big_endian);
-        for &c in &self.nodes[0].children {
+        for &c in &root.children {
             let v = self.read(c, &mut r, 1)?;
-            if &*self.nodes[c].name == name {
+            if &*self.node(c)?.0.name == name {
                 return Ok(Some(v));
             }
         }
@@ -207,8 +219,8 @@ impl TypeTree {
         if depth > 128 {
             return Err(invalid("type tree recursion deeper than 128"));
         }
-        let n = &self.nodes[i];
-        let v = match &self.kinds[i] {
+        let (n, kind) = self.node(i)?;
+        let v = match kind {
             Kind::Prim(p) => prim(*p, r)?,
             Kind::String => {
                 let len = length(r, 1)?;
@@ -224,8 +236,14 @@ impl TypeTree {
                 Value::Array(Array::U8(r.take(len)?.to_vec()))
             }
             Kind::Pair => {
-                let a = self.read(n.children[0], r, depth + 1)?;
-                let b = self.read(n.children[1], r, depth + 1)?;
+                let &[first, second] = n.children.as_slice() else {
+                    return Err(invalid(format!(
+                        "pair node {i} has {} children",
+                        n.children.len()
+                    )));
+                };
+                let a = self.read(first, r, depth.saturating_add(1))?;
+                let b = self.read(second, r, depth.saturating_add(1))?;
                 Value::Pair(Box::new((a, b)))
             }
             Kind::Vector { element, aligned } => {
@@ -244,7 +262,10 @@ impl TypeTree {
             Kind::Struct => {
                 let mut fields = Vec::with_capacity(n.children.len());
                 for &c in &n.children {
-                    fields.push((self.nodes[c].name.clone(), self.read(c, r, depth + 1)?));
+                    fields.push((
+                        self.node(c)?.0.name.clone(),
+                        self.read(c, r, depth.saturating_add(1))?,
+                    ));
                 }
                 Value::Struct(fields)
             }
@@ -256,16 +277,16 @@ impl TypeTree {
     }
 
     fn vector(&self, e: usize, r: &mut Reader, depth: u32) -> Result<Value> {
-        let en = &self.nodes[e];
+        let (en, kind) = self.node(e)?;
         // a primitive element without its own alignment: the elements packed
-        if let Kind::Prim(p) = self.kinds[e]
+        if let Kind::Prim(p) = *kind
             && en.meta_flag & ALIGN == 0
         {
             let n = length(r, p.size())?;
             return Ok(Value::Array(prim_array(p, n, r)?));
         }
         // the shortest an element can be, to bound the count by the bytes left
-        let min = self.min_sizes[e];
+        let min = self.min_sizes.get(e).copied().unwrap_or(0);
         let n = length(r, min)?;
         if min == 0 && n > MAX_EMPTY_ELEMENTS {
             return Err(invalid(format!(
@@ -274,7 +295,7 @@ impl TypeTree {
         }
         let mut out = Vec::with_capacity(n.min(1 << 16));
         for _ in 0..n {
-            out.push(self.read(e, r, depth + 1)?);
+            out.push(self.read(e, r, depth.saturating_add(1))?);
         }
         Ok(Value::Array(Array::Values(out)))
     }

@@ -65,7 +65,18 @@ fn versions_place_metadata_after_their_headers_and_read_object_widths() {
         let object = file.object(42).unwrap();
         assert_eq!(object.class_id, 1);
         assert_eq!(object.offset, (size - 3) as u64);
-        assert_eq!(file.bytes(object), &[0xaa, 0xbb, 0xcc]);
+        assert_eq!(file.bytes(object).unwrap(), &[0xaa, 0xbb, 0xcc]);
+        // an ObjectInfo naming bytes outside the file is an error, not a panic
+        let outside = unity_formats::ObjectInfo {
+            offset: u64::MAX - 1,
+            ..*object
+        };
+        assert!(
+            file.bytes(&outside)
+                .unwrap_err()
+                .to_string()
+                .contains("outside the file")
+        );
     }
 }
 
