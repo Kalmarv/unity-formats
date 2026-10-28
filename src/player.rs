@@ -6,13 +6,15 @@
     reason = "reader I/O: reads the player's data folder"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
-use crate::serialized::SerializedFile;
+use crate::bundle::Bundle;
+use crate::resource::StreamingInfo;
+use crate::serialized::{MONO_BEHAVIOUR, ObjectInfo, SerializedFile};
 use crate::tpk::TypeTreePackage;
 use crate::typetree::TypeTree;
 use crate::value::{Array, Value};
@@ -106,16 +108,39 @@ pub struct BuildScene {
     pub name: String,
 }
 
-/// A Unity player's data folder, read: every SerializedFile in it (and in its `Resources` folder), and the type tree
-/// package that decodes their objects. Objects are named by [`ObjRef`] and decoded on demand.
+/// Which of a bundle's serialized files a player reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeSelection<'a> {
+    /// Every serialized node of the bundle.
+    All,
+    /// The nodes with these paths, and every serialized node of the listed bundles that their external files name
+    /// (transitively): the files a level needs, not the other levels of its bundle.
+    Closure(&'a [&'a str]),
+}
+
+/// A bundle to read into a player, with the files wanted from it.
+#[derive(Clone, Copy, Debug)]
+pub struct BundleSpec<'a> {
+    /// The bundle file.
+    pub path: &'a Path,
+    /// Which of its serialized files to read.
+    pub nodes: NodeSelection<'a>,
+}
+
+/// A Unity player's data folder, read: every SerializedFile in it (and in its `Resources` folder), the serialized
+/// files of the bundles it was opened with ([`Player::open_with_bundles`]), and the type tree package that decodes
+/// their objects. Objects are named by [`ObjRef`] and decoded on demand.
 #[derive(Debug)]
 pub struct Player {
     /// The data folder.
     pub dir: PathBuf,
-    /// By lower-case file name: `level1`, `sharedassets1.assets`, `unity default resources`, ...
+    /// By lower-case file name: `level1`, `sharedassets1.assets`, `unity default resources`, ...; a bundled file by
+    /// the last segment of its node's path (`buildplayer-level_5.sharedassets`).
     pub files: BTreeMap<String, SerializedFile>,
-    /// The folder each file is in (its streamed resources are beside it).
+    /// The folder each loose file is in (its streamed resources are beside it); a bundled file has none.
     pub folders: BTreeMap<String, PathBuf>,
+    /// The bundles files were read from, in the order given.
+    pub bundles: Vec<Arc<Bundle>>,
     package: TypeTreePackage,
     trees: Mutex<BTreeMap<(String, i32), std::sync::Arc<TypeTree>>>,
 }
@@ -136,6 +161,15 @@ impl Player {
     /// player with such a file would otherwise read as one without it. Two files the player would name alike (they
     /// differ by case, or one is in the data folder and one in `Resources`) are refused too.
     pub fn open(dir: &Path, package: TypeTreePackage) -> Result<Self> {
+        Self::open_with_bundles(dir, package, &[])
+    }
+
+    /// As [`Player::open`], with the serialized files of `bundles` as well: a Big Walk style `data.unity3d` that holds
+    /// the player's own files, or a level's AssetBundle beside the loose ones. A bundled file is named like a loose one,
+    /// by the lower-cased last segment of its node's path, and is refused the same way when another file has the name.
+    /// Its objects are read from the bundle by range as they are asked for, so a selection of a bundle costs the
+    /// metadata of its files. A file that stores its type trees decodes with them; others with the package.
+    pub fn open_with_bundles(dir: &Path, package: TypeTreePackage, bundles: &[BundleSpec]) -> Result<Self> {
         let mut files = BTreeMap::new();
         let mut folders = BTreeMap::new();
         let mut paths_of: BTreeMap<String, PathBuf> = BTreeMap::new();
@@ -171,15 +205,77 @@ impl Player {
                         p.display()
                     )));
                 }
-                let f = SerializedFile::parse(bytes).map_err(|e| invalid(format!("{}: {e}", p.display())))?;
+                let f = SerializedFile::parse_with(bytes, Some(&package))
+                    .map_err(|e| invalid(format!("{}: {e}", p.display())))?;
                 folders.insert(name.clone(), d.clone());
                 files.insert(name, f);
             }
+        }
+        let opened = bundles
+            .iter()
+            .map(|spec| Bundle::open(spec.path).map(Arc::new))
+            .collect::<Result<Vec<_>>>()?;
+        // every serialized node of the bundles by the name a pointer gives it
+        let mut by_key: BTreeMap<String, Vec<(usize, &str)>> = BTreeMap::new();
+        for (i, b) in opened.iter().enumerate() {
+            for n in b.nodes().iter().filter(|n| n.is_serialized()) {
+                by_key
+                    .entry(file_key(&n.path))
+                    .or_default()
+                    .push((i, n.path.as_str()));
+            }
+        }
+        let mut pending: Vec<String> = Vec::new();
+        for (spec, b) in bundles.iter().zip(&opened) {
+            match spec.nodes {
+                NodeSelection::All => pending.extend(
+                    b.nodes()
+                        .iter()
+                        .filter(|n| n.is_serialized())
+                        .map(|n| file_key(&n.path)),
+                ),
+                NodeSelection::Closure(paths) => {
+                    for path in paths {
+                        let n = b.node(path).filter(|n| n.is_serialized()).ok_or_else(|| {
+                            invalid(format!("{}: no serialized node {path:?}", spec.path.display()))
+                        })?;
+                        pending.push(file_key(&n.path));
+                    }
+                }
+            }
+        }
+        // a file read brings the files its pointers name, where the listed bundles hold them
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        while let Some(key) = pending.pop() {
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let Some(candidates) = by_key.get(&key) else {
+                continue;
+            };
+            if let Some(loose) = paths_of.get(&key) {
+                return Err(invalid(format!(
+                    "{} and {candidates:?} are both the player's file {key:?}",
+                    loose.display()
+                )));
+            }
+            let [(b, path)] = candidates.as_slice() else {
+                return Err(invalid(format!(
+                    "{} bundled files are all the player's file {key:?}: {candidates:?}",
+                    candidates.len()
+                )));
+            };
+            let (b, path) = (*b, *path);
+            let bundle = opened.get(b).ok_or_else(|| invalid("a bundle went missing"))?;
+            let f = SerializedFile::from_bundle(bundle, path, Some(&package))?;
+            pending.extend(f.externals.iter().map(|e| file_key(&e.path)));
+            files.insert(key, f);
         }
         Ok(Player {
             dir: dir.to_path_buf(),
             files,
             folders,
+            bundles: opened,
             package,
             trees: Mutex::new(BTreeMap::new()),
         })
@@ -197,14 +293,28 @@ impl Player {
         self.files.get(&r.file)?.object(r.path_id).map(|o| o.class_id)
     }
 
-    /// The class name of an object, from the type tree package.
+    /// The class name of an object: the root of the type tree its file stores for the object's type, else the type tree
+    /// package's name for its class id.
     pub fn class_name(&self, r: &ObjRef) -> Option<&str> {
         let f = self.files.get(&r.file)?;
-        self.package.class_name(f.object(r.path_id)?.class_id, f.unity)
+        let o = f.object(r.path_id)?;
+        match f.tree_of(o).and_then(|t| t.root()) {
+            Some(root) => Some(&*root.ty),
+            None => self.package.class_name(o.class_id, f.unity),
+        }
     }
 
-    fn tree(&self, file: &str, f: &SerializedFile, class_id: i32) -> Result<std::sync::Arc<TypeTree>> {
-        let key = (f.unity_version.clone(), class_id);
+    /// The type tree that decodes `o` of `f`: the one the file stores for the object's type; the package's for a file
+    /// that stores none, and for a MonoBehaviour, whose stored tree holds its script's fields as well (see
+    /// [`Player::script_fields`]) where the package's holds the base fields every MonoBehaviour has.
+    fn tree(&self, file: &str, f: &SerializedFile, o: &ObjectInfo) -> Result<Arc<TypeTree>> {
+        let stored = f.tree_of(o);
+        if o.class_id != MONO_BEHAVIOUR
+            && let Some(t) = stored
+        {
+            return Ok(t.clone());
+        }
+        let key = (f.unity_version.clone(), o.class_id);
         // an entry is inserted whole, so a cache left by a thread that panicked is still valid
         let mut cache = self
             .trees
@@ -213,13 +323,16 @@ impl Player {
         if let Some(t) = cache.get(&key) {
             return Ok(t.clone());
         }
-        let t = std::sync::Arc::new(
-            self.package
-                .type_tree(class_id, f.unity)
-                .map_err(|e| invalid(format!("{file}: {e}")))?,
-        );
-        cache.insert(key, t.clone());
-        Ok(t)
+        match self.package.type_tree(o.class_id, f.unity) {
+            Ok(t) => {
+                let t = Arc::new(t);
+                cache.insert(key, t.clone());
+                Ok(t)
+            }
+            // the package lacks the class for this Unity version, the file does not
+            Err(_) if stored.is_some() => stored.cloned().ok_or_else(|| invalid("a type tree went missing")),
+            Err(e) => Err(invalid(format!("{file}: {e}"))),
+        }
     }
 
     /// Decode an object (its type tree must cover it; a MonoBehaviour's base fields only).
@@ -228,7 +341,7 @@ impl Player {
         let o = f
             .object(r.path_id)
             .ok_or_else(|| invalid(format!("{}: no object {}", r.file, r.path_id)))?;
-        let d = f.decode_with(o, &*self.tree(&r.file, f, o.class_id)?)?;
+        let d = f.decode_with(o, &*self.tree(&r.file, f, o)?)?;
         if !d.covered(o.class_id) {
             return Err(invalid(format!(
                 "{}/{} (class {}): {} bytes after its type tree",
@@ -238,6 +351,27 @@ impl Player {
         Ok(d.value)
     }
 
+    /// A MonoBehaviour decoded whole, its script's fields with its base fields, by the type tree its file stores for
+    /// its script's type. `None` for a file that stores no type trees (a player's: the script's fields are
+    /// [`Player::behaviour`]'s bytes there) and for an object of another class. The tree must cover the object.
+    pub fn script_fields(&self, r: &ObjRef) -> Result<Option<Value>> {
+        let f = self.file(&r.file)?;
+        let o = f
+            .object(r.path_id)
+            .ok_or_else(|| invalid(format!("{}: no object {}", r.file, r.path_id)))?;
+        let Some(tree) = f.tree_of(o).filter(|_| o.class_id == MONO_BEHAVIOUR) else {
+            return Ok(None);
+        };
+        let d = f.decode_with(o, tree)?;
+        if d.rest != 0 {
+            return Err(invalid(format!(
+                "{}/{} (class {}): {} bytes after its stored type tree",
+                r.file, r.path_id, o.class_id, d.rest
+            )));
+        }
+        Ok(Some(d.value))
+    }
+
     /// The field `name` of the object's root struct alone ([`TypeTree::decode_field`]): `None` when its class has no
     /// such field. The object need not decode whole, and a field stored early (`m_Name`) is read without the rest.
     pub fn field(&self, r: &ObjRef, name: &str) -> Result<Option<Value>> {
@@ -245,9 +379,22 @@ impl Player {
         let o = f
             .object(r.path_id)
             .ok_or_else(|| invalid(format!("{}: no object {}", r.file, r.path_id)))?;
-        self.tree(&r.file, f, o.class_id)?
-            .decode_field(f.bytes(o)?, f.big_endian, name)
+        self.tree(&r.file, f, o)?
+            .decode_field(&f.bytes(o)?, f.big_endian, name)
             .map_err(|e| invalid(format!("{}/{} (class {}): {e}", r.file, r.path_id, o.class_id)))
+    }
+
+    /// The bytes of a streamed resource (`.resS`, `.resource`) that an object of `file` names: from the file beside the
+    /// loose file, or from the node of its bundle that the path's last segment names.
+    pub fn read_stream(&self, file: &str, info: &StreamingInfo) -> Result<Vec<u8>> {
+        if let Some((bundle, _)) = self.file(file)?.bundle() {
+            return info.read_bundled(bundle);
+        }
+        let dir = self
+            .folders
+            .get(file)
+            .ok_or_else(|| invalid(format!("no folder for {file}")))?;
+        info.read(dir)
     }
 
     /// The scenes of the build, in `BuildSettings`' order: scene `i` is the file `level<i>`. `Ok(empty)` for a player
@@ -312,7 +459,7 @@ impl Player {
         if o.class_id != crate::serialized::MONO_BEHAVIOUR {
             return Err(invalid(format!("{}/{}: not a MonoBehaviour", r.file, r.path_id)));
         }
-        let d = f.decode_with(o, &*self.tree(&r.file, f, o.class_id)?)?;
+        let d = f.decode_with(o, &*self.tree(&r.file, f, o)?)?;
         let bytes = f.bytes(o)?;
         let script = bytes
             .len()

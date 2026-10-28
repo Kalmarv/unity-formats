@@ -250,12 +250,20 @@ fn read_streamed(name: &str, words: &[u32], curve_count: usize) -> Result<(Vec<C
             for x in &mut c {
                 *x = f32::from_le_bytes(take(&mut at, 4)?.try_into().expect("4 bytes"));
             }
-            usize::try_from(index)
-                .ok()
-                .and_then(|i| entries.get_mut(i))
+            let slot = usize::try_from(index).ok().ok_or_else(|| {
+                bad(format!(
+                    "a key of curve {index} of {curve_count} at byte {key_at}"
+                ))
+            })?;
+            entries
+                .get_mut(slot)
+                // frames that end exactly where the data does but name a curve the count does not include (PEAK's
+                // 6000.3.15f1 clips have them, in the first frame and later) are a layout this reader does not know,
+                // not damaged bytes
                 .ok_or_else(|| {
-                    bad(format!(
-                        "a key of curve {index} of {curve_count} at byte {key_at}"
+                    Error::Unsupported(format!(
+                        "{name}: streamed clip: a key of curve {index} of {curve_count} at byte {key_at}, a curve \
+                         past the stated count"
                     ))
                 })?
                 .push((time, c));
@@ -586,8 +594,14 @@ mod tests {
         // a key naming curve 5 of 1, at the byte the key starts (the frame header takes 8)
         let mut words = frame(-f32::MAX, &[(5, [0.0; 4])]);
         words.extend(frame(f32::INFINITY, &[]));
-        let e = read_streamed("t", &words, 1).unwrap_err().to_string();
-        assert!(e.contains("curve 5 of 1 at byte 8"), "{e}");
+        let e = read_streamed("t", &words, 1).unwrap_err();
+        // well-formed frames naming a curve past the count are a layout not read; a negative index is damaged bytes
+        assert!(matches!(e, Error::Unsupported(_)), "{e}");
+        assert!(e.to_string().contains("curve 5 of 1 at byte 8"), "{e}");
+        let mut negative = frame(-f32::MAX, &[(-1, [0.0; 4])]);
+        negative.extend(frame(f32::INFINITY, &[]));
+        let e = read_streamed("t", &negative, 1).unwrap_err();
+        assert!(matches!(e, Error::Invalid(_)), "{e}");
         let mut back = frame(1.0, &[]);
         back.extend(frame(0.5, &[]));
         let e = read_streamed("t", &back, 0).unwrap_err().to_string();

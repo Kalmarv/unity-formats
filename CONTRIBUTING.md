@@ -33,4 +33,4 @@ Do not attach game files, extracted assets, type tree packages made from a game,
 
 ## File access
 
-Library code works on bytes it is given. Only `src/player.rs` (opening a data folder) and `src/resource.rs` (reading a `.resS` file) touch the file system, and they opt out of the `disallowed_methods` and `disallowed_types` lints in `clippy.toml` with a reason; the rest of the crate denies them. Library code reads no environment variables and starts no process.
+Library code works on bytes it is given. Only `src/player.rs` (opening a data folder), `src/resource.rs` (reading a `.resS` file) and `src/bundle.rs` (opening a bundle and reading blocks from it) touch the file system, and they opt out of the `disallowed_methods` and `disallowed_types` lints in `clippy.toml` with a reason; the rest of the crate denies them. Library code reads no environment variables and starts no process.

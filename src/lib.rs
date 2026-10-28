@@ -27,6 +27,8 @@
 //!
 //! The modules:
 //!
+//! - [`bundle`]: UnityFS bundles (AssetBundles, Addressables content, a player's `data.unity3d`): the block table and
+//!   directory, nodes read by range.
 //! - [`serialized`]: the SerializedFile container: header, types, the object table, script references, external
 //!   files. Strict and version-gated: only container versions verified against real data are read.
 //! - [`tpk`]: a type tree package (the TPK format), the class layouts per Unity version that a player build strips
@@ -65,6 +67,7 @@
 )]
 
 pub mod animator;
+pub mod bundle;
 pub mod clip;
 pub mod listing;
 pub mod material;

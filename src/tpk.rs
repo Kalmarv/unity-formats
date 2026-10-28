@@ -32,6 +32,14 @@ struct PackedNode {
     children: Vec<u16>,
 }
 
+/// One Unity version's common string table: the names every embedded type tree of that version shares, as
+/// `(offset into the engine's table, index into the package's strings)` sorted by offset.
+#[derive(Clone, Debug)]
+struct CommonTable {
+    from: UnityVersion,
+    entries: Vec<(u32, u16)>,
+}
+
 /// A parsed type tree package.
 #[derive(Clone, Debug)]
 pub struct TypeTreePackage {
@@ -39,6 +47,46 @@ pub struct TypeTreePackage {
     classes: BTreeMap<i32, Vec<(UnityVersion, Option<Class>)>>,
     nodes: Vec<PackedNode>,
     strings: Vec<Arc<str>>,
+    /// The common string table from each listed version on, in version order.
+    common: Vec<CommonTable>,
+}
+
+/// The common string table of one Unity version, from [`TypeTreePackage::common_strings`]: what an embedded type
+/// tree's string offset with the top bit set names.
+#[derive(Clone, Copy, Debug)]
+pub struct CommonStrings<'a> {
+    package: &'a TypeTreePackage,
+    entries: &'a [(u32, u16)],
+}
+
+impl CommonStrings<'_> {
+    /// The string at `offset` of the engine's table (`0` is `AABB`, ...); `None` for an offset the table has no
+    /// string at.
+    pub fn get(&self, offset: u32) -> Option<&str> {
+        let at = self.entries.binary_search_by_key(&offset, |&(o, _)| o).ok()?;
+        let &(_, string) = self.entries.get(at)?;
+        self.package.strings.get(usize::from(string)).map(|s| &**s)
+    }
+
+    /// How many strings the table holds.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the table is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The strings with their offsets, in offset order.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &str)> + '_ {
+        self.entries.iter().filter_map(|&(offset, string)| {
+            self.package
+                .strings
+                .get(usize::from(string))
+                .map(|s| (offset, &**s))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -49,6 +97,7 @@ impl TypeTreePackage {
             classes: BTreeMap::new(),
             nodes: Vec::new(),
             strings: Vec::new(),
+            common: Vec::new(),
         }
     }
 }
@@ -184,19 +233,32 @@ impl TypeTreePackage {
             }
             classes.insert(id, entries);
         }
-        // the common string table (offsets into Unity's built-in strings): not needed for stripped files
+        // the common string table: what the offsets with the top bit set in an embedded type tree stand for. Format 1
+        // lists, per version, how many of a shared index list's first strings the version has (the strings follow each
+        // other, a NUL after each); format 2 lists, per version, each string's offset and index.
+        let mut common_raw: Vec<(UnityVersion, Vec<(u16, u16)>)> = Vec::new();
+        let mut v1_counts: Vec<(UnityVersion, u8)> = Vec::new();
+        let mut v1_indices: Vec<u16> = Vec::new();
         match format {
             1 => {
-                let n = count(&mut r, "common string version")?;
-                skip(&mut r, n, 9, "common string version")?;
-                let n = count(&mut r, "common string index")?;
-                skip(&mut r, n, 2, "common string index")?;
+                for _ in 0..count(&mut r, "common string version")? {
+                    let version = UnityVersion(r.u64()?);
+                    v1_counts.push((version, r.u8()?));
+                }
+                for _ in 0..count(&mut r, "common string index")? {
+                    v1_indices.push(r.u16()?);
+                }
             }
             _ => {
                 for _ in 0..count(&mut r, "common string version")? {
-                    r.u64()?;
+                    let version = UnityVersion(r.u64()?);
                     let n = count(&mut r, "common string entry")?;
-                    skip(&mut r, n, 4, "common string entry")?;
+                    let mut entries = Vec::new();
+                    for _ in 0..n {
+                        let offset = r.u16()?;
+                        entries.push((offset, r.u16()?));
+                    }
+                    common_raw.push((version, entries));
                 }
             }
         }
@@ -228,10 +290,43 @@ impl TypeTreePackage {
                 r.remaining()
             )));
         }
+        for (version, n) in v1_counts {
+            let mut offset = 0u16;
+            let mut entries = Vec::new();
+            for &index in v1_indices.iter().take(usize::from(n)) {
+                entries.push((offset, index));
+                let len = strings
+                    .get(usize::from(index))
+                    .ok_or_else(|| invalid("TPK: common string index out of range"))?
+                    .len();
+                offset = u16::try_from(len)
+                    .ok()
+                    .and_then(|l| offset.checked_add(l))
+                    .and_then(|o| o.checked_add(1))
+                    .ok_or_else(|| invalid("TPK: common string table longer than 64 KiB"))?;
+            }
+            common_raw.push((version, entries));
+        }
+        let common = common_raw
+            .into_iter()
+            .map(|(from, entries)| {
+                let mut entries: Vec<(u32, u16)> =
+                    entries.into_iter().map(|(o, s)| (u32::from(o), s)).collect();
+                entries.sort_unstable();
+                if entries
+                    .windows(2)
+                    .any(|w| w.first().map(|e| e.0) == w.get(1).map(|e| e.0))
+                {
+                    return Err(invalid("TPK: two common strings at one offset"));
+                }
+                Ok(CommonTable { from, entries })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let pkg = TypeTreePackage {
             classes,
             nodes,
             strings,
+            common,
         };
         pkg.check()?;
         Ok(pkg)
@@ -246,6 +341,11 @@ impl TypeTreePackage {
             }
             if n.children.iter().any(|&c| usize::from(c) >= nn) {
                 return Err(invalid("TPK: child node index out of range"));
+            }
+        }
+        for t in &self.common {
+            if t.entries.iter().any(|&(_, s)| usize::from(s) >= ns) {
+                return Err(invalid("TPK: common string index out of range"));
             }
         }
         for c in self.classes.values().flatten().filter_map(|(_, c)| c.as_ref()) {
@@ -263,6 +363,16 @@ impl TypeTreePackage {
             .take_while(|(v, _)| *v <= version)
             .last()
             .and_then(|(_, c)| c.as_ref())
+    }
+
+    /// The common string table of a Unity version: the table of the newest listed version that is not newer than
+    /// `version`. `None` for a package that lists none up to that version.
+    pub fn common_strings(&self, version: UnityVersion) -> Option<CommonStrings<'_>> {
+        let table = self.common.iter().take_while(|t| t.from <= version).last()?;
+        Some(CommonStrings {
+            package: self,
+            entries: &table.entries,
+        })
     }
 
     /// The class's name in that Unity version.
@@ -453,6 +563,7 @@ mod tests {
             classes: BTreeMap::from([(1, vec![(UnityVersion(0), Some(class))])]),
             nodes,
             strings: vec![std::sync::Arc::from("Base")],
+            common: Vec::new(),
         };
         let e = pkg.type_tree(1, UnityVersion(1)).unwrap_err().to_string();
         assert!(e.contains("more than 1048576 nodes"), "{e}");

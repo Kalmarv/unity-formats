@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::bundle::{Bundle, BundleNode};
 use crate::value::Value;
 use crate::{Error, Result, invalid};
 
@@ -88,6 +89,56 @@ impl StreamingInfo {
         let mut out = vec![0; size];
         f.read_exact(&mut out).map_err(io)?;
         Ok(out)
+    }
+}
+
+impl StreamingInfo {
+    /// The stream node of `bundle` that the path names: the node that is no SerializedFile and whose path ends with
+    /// the same last segment, compared without regard to case (the path is `archive:/<name>/<name>` for a bundled
+    /// file). The data must lie inside the node; no such node, or two, is an error.
+    pub fn node_in<'b>(&self, bundle: &'b Bundle) -> Result<&'b BundleNode> {
+        let last = |p: &str| {
+            p.replace('\\', "/")
+                .rsplit('/')
+                .next()
+                .unwrap_or(p)
+                .to_lowercase()
+        };
+        let name = last(&self.path);
+        let mut found = bundle
+            .nodes()
+            .iter()
+            .filter(|n| !n.is_serialized() && last(&n.path) == name);
+        let (Some(node), None) = (found.next(), found.next()) else {
+            return Err(invalid(format!(
+                "{}: streamed resource {:?} is not one stream node of the bundle",
+                bundle.path().display(),
+                self.path
+            )));
+        };
+        if self
+            .offset
+            .checked_add(self.size)
+            .is_none_or(|end| end > node.size)
+        {
+            return Err(invalid(format!(
+                "{}: {}: {}+{} past its end ({} bytes)",
+                bundle.path().display(),
+                node.path,
+                self.offset,
+                self.size,
+                node.size
+            )));
+        }
+        Ok(node)
+    }
+
+    /// Read the data from the node of `bundle` that [`StreamingInfo::node_in`] names.
+    pub fn read_bundled(&self, bundle: &Bundle) -> Result<Vec<u8>> {
+        let node = self.node_in(bundle)?;
+        let len = usize::try_from(self.size)
+            .map_err(|_| invalid(format!("{}: {} bytes do not fit memory", node.path, self.size)))?;
+        bundle.read(node, self.offset, len)
     }
 }
 

@@ -948,13 +948,7 @@ impl UnityMeshData {
                 .transpose()?
                 .flatten();
             let data: Vec<u8> = match stream_data {
-                Some(s) => {
-                    let dir = player
-                        .folders
-                        .get(&r.file)
-                        .ok_or_else(|| invalid(format!("no folder for {}", r.file)))?;
-                    s.read(dir)?
-                }
+                Some(s) => player.read_stream(&r.file, &s)?,
                 None => bytes(vd, "m_DataSize")?.to_vec(),
             };
             // every stream holds its vertices, so what is allocated per vertex below is backed by the data

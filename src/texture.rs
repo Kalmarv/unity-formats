@@ -146,13 +146,7 @@ impl UnityTexture {
             .transpose()?
             .flatten();
         let data = match stream {
-            Some(s) => {
-                let dir = player
-                    .folders
-                    .get(&r.file)
-                    .ok_or_else(|| invalid(format!("no folder for {}", r.file)))?;
-                s.read(dir)?
-            }
+            Some(s) => player.read_stream(&r.file, &s)?,
             None => t
                 .get("image data")
                 .and_then(Value::as_bytes)
