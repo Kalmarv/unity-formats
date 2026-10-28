@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Breaking:** `animator::SelectorTransition::destination` is an `Option<u32>`: `None` for a stored destination of `0xFFFFFFFF` (`animator::NO_DESTINATION`), which names no state or selector. PEAK's `Ambience` and `Scout` controllers have a layer with no states whose entry node's one transition stores it, and the controller check refused them (`read_level` of a PEAK level stopped there). The check takes `None` on an entry node's transition and refuses it on an exit node's.
+
 ## 0.2.0 (2026-10-28)
 
 - **Breaking:** `SerializedFile::bytes` returns `Cow<[u8]>` (a file read from a bundle reads an object's bytes from the bundle when asked).

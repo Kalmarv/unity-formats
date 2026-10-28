@@ -340,11 +340,16 @@ pub struct State {
     pub mirror: bool,
 }
 
+/// What a selector transition's stored `m_Destination` holds when it leads nowhere (`0xFFFFFFFF`, an invalid index):
+/// [`SelectorTransition::destination`] is `None` for it.
+pub const NO_DESTINATION: u32 = u32::MAX;
+
 /// A transition out of an entry or exit selector (`SelectorTransitionConstant`).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SelectorTransition {
-    /// A state, or [`SELECTOR_BASE`] plus a selector node.
-    pub destination: u32,
+    /// A state, or [`SELECTOR_BASE`] plus a selector node; `None` for [`NO_DESTINATION`]. In the files read it is the
+    /// one transition of the entry node of a state machine that has no states (a layer with nothing in it), and nowhere else.
+    pub destination: Option<u32>,
     /// `m_ConditionConstantArray`.
     pub conditions: Vec<Condition>,
 }

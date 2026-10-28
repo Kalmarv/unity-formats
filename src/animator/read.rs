@@ -3,8 +3,8 @@
 
 use crate::animator::{
     AvatarAxes, AvatarHuman, AvatarSkeleton, BlendNode, Condition, HumanBone, HumanDescription, Layer,
-    Parameter, SELECTOR_BASE, SelectorState, SelectorTransition, SkeletonBone, State, StateMachine,
-    Transition, UnityAnimatorController, UnityAvatar, Xform,
+    NO_DESTINATION, Parameter, SELECTOR_BASE, SelectorState, SelectorTransition, SkeletonBone, State,
+    StateMachine, Transition, UnityAnimatorController, UnityAvatar, Xform,
 };
 use crate::player::{ObjRef, Player};
 use crate::value::{Array, Value};
@@ -521,7 +521,8 @@ fn state_machine(f: &Fields, m: &Value) -> Result<StateMachine> {
                         .map(|t| {
                             let t = f.data(t)?;
                             Ok(SelectorTransition {
-                                destination: f.uint(t, "m_Destination")?,
+                                destination: Some(f.uint(t, "m_Destination")?)
+                                    .filter(|&d| d != NO_DESTINATION),
                                 conditions: conditions(f, t, "m_ConditionConstantArray")?,
                             })
                         })
@@ -653,12 +654,23 @@ impl UnityAnimatorController {
                     )));
                 }
             }
-            for t in machine.selectors.iter().flat_map(|s| &s.transitions) {
-                if !reaches(i64::from(t.destination)) {
-                    return Err(bad(format!(
-                        "state machine {m}: a selector transition to {} of {states} states and {selectors} selectors",
-                        t.destination
-                    )));
+            for selector in &machine.selectors {
+                for t in &selector.transitions {
+                    match t.destination {
+                        Some(d) if reaches(i64::from(d)) => {}
+                        Some(d) => {
+                            return Err(bad(format!(
+                                "state machine {m}: a selector transition to {d} of {states} states and {selectors} selectors"
+                            )));
+                        }
+                        // an entry node with nowhere to enter: the state machine of an empty layer has no state to start in
+                        None if selector.is_entry => {}
+                        None => {
+                            return Err(bad(format!(
+                                "state machine {m}: an exit selector transition to no destination"
+                            )));
+                        }
+                    }
                 }
             }
             for s in &machine.states {
@@ -937,5 +949,103 @@ mod tests {
         assert!(e(controller(0, 30000, 0, 0)).contains("a transition to 30000"));
         assert!(e(controller(0, 0, 2, 0)).contains("runs state machine 2 of 1"));
         assert!(e(controller(0, 0, 0, 3)).contains("at 3 of 1 defaults"));
+    }
+
+    /// The machine of an empty layer: no states, an entry node whose one transition stores `0xFFFFFFFF` and an exit node
+    /// that leads to selector node 0. A census of the 699 compiled controllers in 529 serialized files of PEAK, Sledding
+    /// Game, Big Walk and SkateBIRD found exactly this in 16 machines (`Ambience` and `Scout`, in each of PEAK's seven
+    /// level bundles and its loose `resources.assets`), and the destination nowhere else among the 1,671 selector
+    /// transitions.
+    fn empty_layer_machine(entry_destination: u64, exit_destination: u64) -> Value {
+        let transition = |destination: u64| {
+            s(&[(
+                "data",
+                s(&[
+                    ("m_Destination", Value::UInt(destination)),
+                    ("m_ConditionConstantArray", list(vec![])),
+                ]),
+            )])
+        };
+        let selector = |entry: bool, destination: u64| {
+            s(&[(
+                "data",
+                s(&[
+                    ("m_TransitionConstantArray", list(vec![transition(destination)])),
+                    ("m_FullPathID", Value::UInt(756_556_552)),
+                    ("m_IsEntry", Value::Bool(entry)),
+                ]),
+            )])
+        };
+        s(&[(
+            "data",
+            s(&[
+                ("m_StateConstantArray", list(vec![])),
+                ("m_AnyStateTransitionConstantArray", list(vec![])),
+                (
+                    "m_SelectorStateConstantArray",
+                    list(vec![
+                        selector(true, entry_destination),
+                        selector(false, exit_destination),
+                    ]),
+                ),
+                ("m_DefaultState", Value::Int(0)),
+                ("m_SynchronizedLayerCount", Value::Int(0)),
+            ]),
+        )])
+    }
+
+    /// A selector transition that stores `0xFFFFFFFF` leads nowhere (`None`); the controller holding it passes its
+    /// checks when it is an entry node's, and a stored destination off the end of the machine does not.
+    #[test]
+    fn a_selector_transition_to_nothing_is_no_destination() {
+        let f = Fields { what: "t" };
+        let machine = state_machine(&f, &empty_layer_machine(u64::from(NO_DESTINATION), 30_000)).unwrap();
+        assert!(machine.states.is_empty());
+        assert_eq!(machine.selectors.len(), 2);
+        assert!(machine.selectors[0].is_entry);
+        assert_eq!(machine.selectors[0].transitions[0].destination, None);
+        assert!(!machine.selectors[1].is_entry);
+        assert_eq!(machine.selectors[1].transitions[0].destination, Some(30000));
+
+        let controller = |machine: StateMachine| UnityAnimatorController {
+            controller: ObjRef {
+                file: "f".into(),
+                path_id: 1,
+            },
+            name: "Scout".into(),
+            layers: vec![Layer {
+                state_machine: 0,
+                synchronized_layer: 0,
+                body_mask: [u32::MAX; 3],
+                skeleton_mask: vec![],
+                binding: 5,
+                blending_mode: 0,
+                default_weight: 1.0,
+                ik_pass: false,
+                synced_layer_affects_timing: false,
+            }],
+            state_machines: vec![machine],
+            parameters: vec![],
+            default_floats: vec![],
+            default_ints: vec![],
+            default_bools: vec![],
+            clips: vec![],
+            behaviours: vec![],
+            tos: vec![],
+        };
+        assert!(controller(machine.clone()).check("c").is_ok());
+
+        // no destination is an entry node's: an exit node without one, and a destination past the machine, are refused
+        let mut exit_to_nowhere = machine.clone();
+        exit_to_nowhere.selectors[1].transitions[0].destination = None;
+        let e = controller(exit_to_nowhere).check("c").unwrap_err().to_string();
+        assert!(e.contains("an exit selector transition to no destination"), "{e}");
+        let mut past_the_end = machine;
+        past_the_end.selectors[0].transitions[0].destination = Some(30002);
+        let e = controller(past_the_end).check("c").unwrap_err().to_string();
+        assert!(
+            e.contains("a selector transition to 30002 of 0 states and 2 selectors"),
+            "{e}"
+        );
     }
 }

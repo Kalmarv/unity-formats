@@ -421,3 +421,56 @@ fn players_read_bundled_files_like_loose_ones() {
         );
     }
 }
+
+/// The AnimatorControllers in the files of one PEAK level read whole, among them the two with an empty layer (`Ambience`'s
+/// first, `Scout`'s seventh): a state machine without states, whose entry node's one transition stores `0xFFFFFFFF` and
+/// so has no destination.
+///
+/// Expected values: an independent census (UnityPy over a bundle reader of its own) of the compiled controllers in 529
+/// serialized files of PEAK, Sledding Game, Big Walk and SkateBIRD: 699 controllers with 1,671 selector transitions, of
+/// which 16 store `0xFFFFFFFF`, each the only transition of an entry node of a machine without states, in `Ambience` and
+/// `Scout` of each of PEAK's seven level bundles and of its loose `resources.assets`. In `levels192-207` the closure of
+/// `BuildPlayer-Level_207` holds the shared assets of levels 193 (73 controllers), 200 (6) and 197 (none); the two are
+/// in level 193's.
+#[test]
+fn peak_controllers_read_including_the_layers_with_nothing_in_them() {
+    use unity_formats::animator::UnityAnimatorController;
+    use unity_formats::listing::list;
+    use unity_formats::player::{BundleSpec, NodeSelection, Player};
+    let Some(tpk) = tool(Tool::UnityTpk) else { return };
+    let Some(data) = install_file(Game::Peak, "PEAK_Data") else {
+        return;
+    };
+    let package = TypeTreePackage::parse(&std::fs::read(tpk).unwrap()).unwrap();
+    let bundle = data.join("StreamingAssets/maps/levels192-207.assetbundle");
+    let spec = BundleSpec {
+        path: &bundle,
+        nodes: NodeSelection::Closure(&["BuildPlayer-Level_207"]),
+    };
+    let player = Player::open_with_bundles(&data, package, &[spec]).unwrap();
+    let controllers = list(&player, Some(&["AnimatorController"])).unwrap();
+    // the closure holds the shared assets of levels 193 (73), 200 (6) and 197 (none); 192's are not in it
+    assert_eq!(controllers.entries.len(), 79);
+    let mut to_nowhere = Vec::new();
+    for e in &controllers.entries {
+        let c = UnityAnimatorController::read(&player, &e.object).unwrap();
+        for (m, machine) in c.state_machines.iter().enumerate() {
+            for selector in &machine.selectors {
+                for t in selector.transitions.iter().filter(|t| t.destination.is_none()) {
+                    assert!(selector.is_entry && machine.states.is_empty() && t.conditions.is_empty());
+                    to_nowhere.push(format!(
+                        "{}/{} {:?} machine {m}",
+                        e.object.file, e.object.path_id, c.name
+                    ));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        to_nowhere,
+        [
+            "buildplayer-level_193.sharedassets/7070 \"Ambience\" machine 0",
+            "buildplayer-level_193.sharedassets/7071 \"Scout\" machine 6",
+        ]
+    );
+}
