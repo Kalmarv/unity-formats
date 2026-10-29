@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.2 (2026-10-29)
 
 - `program::colour_properties` reads the colour properties a shader declares (`m_ParsedForm.m_PropInfo.m_Props`, type 0) with their `m_Flags` (`ColourProperty`; `ColourProperty::hdr`, `PROPERTY_HDR`: `ShaderPropertyFlags.HDR`, 16). A linear colour space player hands an `[HDR]` colour's stored value to its programs as it is and converts any other colour from gamma to linear, so the flag decides what a stored colour is. PEAK's `W/Peak_Standard` declares every colour `[HDR]`; URP Lit `_BaseColor` `[MainColor]` (256) and `_EmissionColor` `[HDR]`; built-in Standard none, as UnityPy reads them (`tests/shader_properties.rs`, `tests/oracles/unitypy_shader_properties.py`).
 
