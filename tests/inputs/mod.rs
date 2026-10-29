@@ -110,6 +110,30 @@ primase_testdata::inputs! {
             about: r#"an independent census of Big Walk's `data.unity3d` (JSON lines; tests/oracles/unitypy_bundles.py makes it, tests/bundles.rs compares)"#,
             source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy) and the script's own bundle reader"#,
         },
+        Query::Oracle(OracleSet::UnityPy, Game::Skatebird, "player-settings.json") => {
+            status: Live,
+            gate: true,
+            about: r#"the colour space SkateBIRD's PlayerSettings states (`m_ActiveColorSpace`, JSON; tests/oracles/unitypy_player_settings.py makes it, tests/player_settings.rs compares)"#,
+            source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_player_settings.py"#,
+        },
+        Query::Oracle(OracleSet::UnityPy, Game::Sledding, "player-settings.json") => {
+            status: Live,
+            gate: true,
+            about: r#"the colour space Sledding Game's PlayerSettings states (`m_ActiveColorSpace`, JSON; tests/oracles/unitypy_player_settings.py makes it, tests/player_settings.rs compares)"#,
+            source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_player_settings.py"#,
+        },
+        Query::Oracle(OracleSet::UnityPy, Game::Peak, "player-settings.json") => {
+            status: Live,
+            gate: true,
+            about: r#"the colour space PEAK's PlayerSettings states (`m_ActiveColorSpace`, JSON; tests/oracles/unitypy_player_settings.py makes it, tests/player_settings.rs compares)"#,
+            source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_player_settings.py"#,
+        },
+        Query::Oracle(OracleSet::UnityPy, Game::Bigwalk, "player-settings.json") => {
+            status: Live,
+            gate: true,
+            about: r#"the colour space Big Walk's PlayerSettings states (`m_ActiveColorSpace`, JSON; tests/oracles/unitypy_player_settings.py makes it, tests/player_settings.rs compares)"#,
+            source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_player_settings.py"#,
+        },
     }
     debug {}
 }

@@ -29,6 +29,10 @@ pub struct ObjRef {
     pub path_id: i64,
 }
 
+/// The file that holds a player's manager objects (its BuildSettings, GraphicsSettings, QualitySettings and
+/// PlayerSettings).
+const MANAGERS: &str = "globalgamemanagers";
+
 /// The script class of Universal Render Pipeline's asset (`m_Namespace.m_ClassName` of its MonoScript).
 pub const URP_ASSET: &str = "UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset";
 
@@ -93,6 +97,17 @@ pub struct QualityLevel {
     pub shadow_distance: f32,
     /// `shadowCascades`: the built-in pipeline's cascade count.
     pub shadow_cascades: i64,
+}
+
+/// The colour space a player renders in (PlayerSettings' `m_ActiveColorSpace`, a project setting the build stores): in
+/// `Linear` the engine converts colour properties from their gamma-encoded storage to linear before a program reads
+/// them and samples sRGB textures as linear; in `Gamma` it hands both to programs as stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum ColourSpace {
+    /// `m_ActiveColorSpace` 0.
+    Gamma,
+    /// `m_ActiveColorSpace` 1.
+    Linear,
 }
 
 /// A scene of the build ([`Player::scenes`]).
@@ -400,31 +415,16 @@ impl Player {
     /// The scenes of the build, in `BuildSettings`' order: scene `i` is the file `level<i>`. `Ok(empty)` for a player
     /// without a `globalgamemanagers` or a `BuildSettings` (a player is never read for scenes it does not list).
     pub fn scenes(&self) -> Result<Vec<BuildScene>> {
-        const FILE: &str = "globalgamemanagers";
-        let Some(f) = self.files.get(FILE) else {
-            return Ok(Vec::new());
-        };
-        let mut found = None;
-        for o in &f.objects {
-            let r = ObjRef {
-                file: FILE.into(),
-                path_id: o.path_id,
-            };
-            if self.class_name(&r) == Some("BuildSettings") {
-                if found.is_some() {
-                    return Err(invalid(format!("{FILE}: more than one BuildSettings")));
-                }
-                found = Some(r);
-            }
-        }
-        let Some(r) = found else {
+        let Some(r) = self.manager_object("BuildSettings")? else {
             return Ok(Vec::new());
         };
         let list = self
             .field(&r, "scenes")?
-            .ok_or_else(|| invalid(format!("{FILE}: BuildSettings without a scene list")))?;
+            .ok_or_else(|| invalid(format!("{MANAGERS}: BuildSettings without a scene list")))?;
         let Value::Array(Array::Values(paths)) = list else {
-            return Err(invalid(format!("{FILE}: BuildSettings' scenes is not a list")));
+            return Err(invalid(format!(
+                "{MANAGERS}: BuildSettings' scenes is not a list"
+            )));
         };
         paths
             .iter()
@@ -432,7 +432,7 @@ impl Player {
             .map(|(index, p)| {
                 let path = p
                     .as_str()
-                    .ok_or_else(|| invalid(format!("{FILE}: scene {index} is not a path")))?
+                    .ok_or_else(|| invalid(format!("{MANAGERS}: scene {index} is not a path")))?
                     .to_owned();
                 let name = path
                     .rsplit('/')
@@ -482,35 +482,16 @@ impl Player {
     /// QualitySettings levels. `None` when the player has no GraphicsSettings.
     #[allow(clippy::type_complexity)]
     fn pipeline_assets(&self) -> Result<Option<Vec<(Option<String>, Option<ObjRef>)>>> {
-        const FILE: &str = "globalgamemanagers";
-        let Some(f) = self.files.get(FILE) else {
-            return Ok(None);
-        };
-        let one = |class: &str| -> Result<Option<Value>> {
-            let mut found = None;
-            for o in &f.objects {
-                let r = ObjRef {
-                    file: FILE.into(),
-                    path_id: o.path_id,
-                };
-                if self.class_name(&r) == Some(class) {
-                    if found.is_some() {
-                        return Err(invalid(format!("{FILE}: more than one {class}")));
-                    }
-                    found = Some(self.decode(&r)?);
-                }
-            }
-            Ok(found)
-        };
-        let Some(graphics) = one("GraphicsSettings")? else {
+        let Some(graphics) = self.manager("GraphicsSettings")? else {
             return Ok(None);
         };
         let asset = |pptr: Option<&Value>| -> Result<Option<ObjRef>> {
-            Ok(pptr.map(|p| self.resolve(FILE, p)).transpose()?.flatten())
+            Ok(pptr.map(|p| self.resolve(MANAGERS, p)).transpose()?.flatten())
         };
         let default = asset(graphics.get("m_CustomRenderPipeline"))?;
         let mut levels = Vec::new();
-        if let Some(Value::Array(crate::value::Array::Values(qs))) = one("QualitySettings")?
+        if let Some(Value::Array(crate::value::Array::Values(qs))) = self
+            .manager("QualitySettings")?
             .as_ref()
             .and_then(|q| q.get("m_QualitySettings"))
         {
@@ -628,23 +609,47 @@ impl Player {
         current_level(&settings, &levels_of(&settings)?)
     }
 
+    /// The colour space the player renders in: its PlayerSettings' `m_ActiveColorSpace` ([`ColourSpace`]). `None` when
+    /// the player has no PlayerSettings; a value other than 0 or 1 (the editor's -1, uninitialised) is an error.
+    ///
+    /// The field is read alone ([`Player::field`]), not the object whole: for the Unity 6000.3 players read so far
+    /// (Sledding Game, PEAK, Big Walk) the type tree package's PlayerSettings layout covers 4 bytes fewer than the
+    /// build stores, the shortfall UnityPy's layouts read too, while the fields before the colour space decode alike.
+    pub fn colour_space(&self) -> Result<Option<ColourSpace>> {
+        let Some(settings) = self.manager_object("PlayerSettings")? else {
+            return Ok(None);
+        };
+        let value = self.field(&settings, "m_ActiveColorSpace")?;
+        colour_space_of(value.as_ref()).map(Some)
+    }
+
     /// The decoded QualitySettings of `globalgamemanagers`, `None` when the player has none.
     fn quality_settings(&self) -> Result<Option<Value>> {
-        const FILE: &str = "globalgamemanagers";
-        let Some(f) = self.files.get(FILE) else {
+        self.manager("QualitySettings")
+    }
+
+    /// The one object of the manager class `class` (GraphicsSettings, QualitySettings) in
+    /// `globalgamemanagers`, decoded; `None` when the player has no such file or object. Two of one class are an error.
+    fn manager(&self, class: &str) -> Result<Option<Value>> {
+        self.manager_object(class)?.map(|r| self.decode(&r)).transpose()
+    }
+
+    /// The one object of the manager class `class` in `globalgamemanagers` ([`Player::manager`]), not decoded.
+    fn manager_object(&self, class: &str) -> Result<Option<ObjRef>> {
+        let Some(f) = self.files.get(MANAGERS) else {
             return Ok(None);
         };
         let mut found = None;
         for o in &f.objects {
             let r = ObjRef {
-                file: FILE.into(),
+                file: MANAGERS.into(),
                 path_id: o.path_id,
             };
-            if self.class_name(&r) == Some("QualitySettings") {
+            if self.class_name(&r) == Some(class) {
                 if found.is_some() {
-                    return Err(invalid(format!("{FILE}: more than one QualitySettings")));
+                    return Err(invalid(format!("{MANAGERS}: more than one {class}")));
                 }
-                found = Some(self.decode(&r)?);
+                found = Some(r);
             }
         }
         Ok(found)
@@ -688,13 +693,12 @@ impl Player {
 
 /// The quality levels a decoded QualitySettings lists, in order.
 fn levels_of(settings: &Value) -> Result<Vec<QualityLevel>> {
-    const FILE: &str = "globalgamemanagers";
     let levels = match settings.get("m_QualitySettings") {
         Some(Value::Array(Array::Values(levels))) => levels.as_slice(),
         Some(Value::Array(a)) if a.is_empty() => &[],
         _ => {
             return Err(invalid(format!(
-                "{FILE}: QualitySettings without m_QualitySettings"
+                "{MANAGERS}: QualitySettings without m_QualitySettings"
             )));
         }
     };
@@ -729,6 +733,18 @@ fn levels_of(settings: &Value) -> Result<Vec<QualityLevel>> {
             })
         })
         .collect()
+}
+
+/// The colour space PlayerSettings' `m_ActiveColorSpace` states (0 gamma, 1 linear); `None`: the field is absent.
+fn colour_space_of(value: Option<&Value>) -> Result<ColourSpace> {
+    let value = value.ok_or_else(|| invalid("PlayerSettings without m_ActiveColorSpace"))?;
+    match value.as_i64() {
+        Some(0) => Ok(ColourSpace::Gamma),
+        Some(1) => Ok(ColourSpace::Linear),
+        _ => Err(invalid(format!(
+            "PlayerSettings: m_ActiveColorSpace {value:?} is neither 0 (gamma) nor 1 (linear)"
+        ))),
+    }
 }
 
 /// The name of the level a decoded QualitySettings' `m_CurrentQuality` indexes among `levels`, `None` where it states none.
@@ -791,6 +807,21 @@ mod tests {
         }
         assert!(name(Value::String("2".into())).is_err());
         assert!(current_level(&settings(Some(Value::Int(0))), &[]).is_err());
+    }
+
+    /// `m_ActiveColorSpace` 0 is gamma and 1 linear; the editor's uninitialised -1, any other number, a value that is no
+    /// number and a PlayerSettings without the field are refused, not read as either.
+    #[test]
+    fn the_colour_space_is_player_settings_active_color_space() {
+        let space = |v| colour_space_of(Some(&v));
+        assert_eq!(space(Value::Int(0)).unwrap(), ColourSpace::Gamma);
+        assert_eq!(space(Value::Int(1)).unwrap(), ColourSpace::Linear);
+        assert_eq!(space(Value::UInt(1)).unwrap(), ColourSpace::Linear);
+        for refused in [Value::Int(-1), Value::Int(2), Value::String("1".into())] {
+            let error = space(refused).unwrap_err().to_string();
+            assert!(error.contains("m_ActiveColorSpace"), "{error}");
+        }
+        assert!(colour_space_of(None).is_err());
     }
 
     /// A SerializedFile of `version` with no objects, laid out as tests/serialized_headers.rs lays them out: 21 keeps

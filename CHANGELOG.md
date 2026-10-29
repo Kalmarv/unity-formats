@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `Player::colour_space` reads the colour space a player's programs and textures work in, `player::ColourSpace` (`Gamma` or `Linear`), from its PlayerSettings' `m_ActiveColorSpace`; `None` for a player with no PlayerSettings. It reads that one field: for the Unity 6 players read (Sledding Game, PEAK, Big Walk) the package's PlayerSettings layout is 4 bytes short of the stored object, as UnityPy's is, so the whole object does not decode. SkateBIRD's, Sledding Game's, PEAK's and Big Walk's players are all `Linear`, as UnityPy reads them (`tests/player_settings.rs`).
+
 ## 0.2.0 (2026-10-29)
 
 - **Breaking:** `animator::SelectorTransition::destination` is an `Option<u32>`: `None` for a stored destination of `0xFFFFFFFF` (`animator::NO_DESTINATION`), which names no state or selector. PEAK's `Ambience` and `Scout` controllers have a layer with no states whose entry node's one transition stores it, and the controller check refused them (`read_level` of a PEAK level stopped there). The check takes `None` on an entry node's transition and refuses it on an exit node's.
