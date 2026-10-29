@@ -890,16 +890,20 @@ pub fn dxbc(code: &[u8]) -> Option<&[u8]> {
     })
 }
 
+/// The properties a decoded shader declares (`m_ParsedForm.m_PropInfo.m_Props`); none where it states none.
+fn properties(s: &Value) -> Result<&[Value]> {
+    Ok(s.get("m_ParsedForm")
+        .and_then(|f| f.get("m_PropInfo"))
+        .map(|p| items(p, "m_Props"))
+        .transpose()?
+        .unwrap_or(&[]))
+}
+
 /// The default each texture property of shader `r` declares (`m_ParsedForm.m_PropInfo.m_Props`, type 4:
 /// `m_DefTexture.m_DefaultName`), by property.
 pub fn texture_defaults(player: &Player, r: &ObjRef) -> Result<Vec<(String, String)>> {
     let s = player.decode(r)?;
-    let props = s
-        .get("m_ParsedForm")
-        .and_then(|f| f.get("m_PropInfo"))
-        .map(|p| items(p, "m_Props"))
-        .transpose()?
-        .unwrap_or(&[]);
+    let props = properties(&s)?;
     let mut out = Vec::new();
     for p in props {
         if p.get("m_Type").and_then(Value::as_i64) != Some(4) {
@@ -913,6 +917,52 @@ pub fn texture_defaults(player: &Player, r: &ObjRef) -> Result<Vec<(String, Stri
         if let (Some(name), Some(default)) = (name, default) {
             out.push((name.to_owned(), default.to_owned()));
         }
+    }
+    Ok(out)
+}
+
+/// Unity's `ShaderPropertyFlags.HDR`: a colour property declared `[HDR]`.
+pub const PROPERTY_HDR: u32 = 16;
+
+/// A colour property a shader declares (`m_ParsedForm.m_PropInfo.m_Props`, type 0) and its `m_Flags` (Unity's
+/// `ShaderPropertyFlags`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColourProperty {
+    /// The property's name (`_BaseColor`).
+    pub name: String,
+    /// Its `m_Flags` (`ShaderPropertyFlags`; [`PROPERTY_HDR`] is `[HDR]`).
+    pub flags: u32,
+}
+
+impl ColourProperty {
+    /// Whether the property is declared `[HDR]` ([`PROPERTY_HDR`]). In a linear colour space player Unity hands an HDR
+    /// colour's stored value to the programs as it is, and converts any other colour from gamma to linear.
+    pub fn hdr(&self) -> bool {
+        self.flags & PROPERTY_HDR != 0
+    }
+}
+
+/// The colour properties shader `r` declares, with their flags, in its order.
+pub fn colour_properties(player: &Player, r: &ObjRef) -> Result<Vec<ColourProperty>> {
+    let s = player.decode(r)?;
+    let mut out = Vec::new();
+    for p in properties(&s)? {
+        if p.get("m_Type").and_then(Value::as_i64) != Some(0) {
+            continue;
+        }
+        let name = p
+            .get("m_Name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("shader property: a colour property has no m_Name"))?;
+        let flags = p
+            .get("m_Flags")
+            .and_then(Value::as_i64)
+            .and_then(|f| u32::try_from(f).ok())
+            .ok_or_else(|| invalid(format!("shader property {name}: m_Flags is not a u32")))?;
+        out.push(ColourProperty {
+            name: name.to_owned(),
+            flags,
+        });
     }
     Ok(out)
 }

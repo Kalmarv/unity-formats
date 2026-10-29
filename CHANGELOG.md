@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `program::colour_properties` reads the colour properties a shader declares (`m_ParsedForm.m_PropInfo.m_Props`, type 0) with their `m_Flags` (`ColourProperty`; `ColourProperty::hdr`, `PROPERTY_HDR`: `ShaderPropertyFlags.HDR`, 16). A linear colour space player hands an `[HDR]` colour's stored value to its programs as it is and converts any other colour from gamma to linear, so the flag decides what a stored colour is. PEAK's `W/Peak_Standard` declares every colour `[HDR]`; URP Lit `_BaseColor` `[MainColor]` (256) and `_EmissionColor` `[HDR]`; built-in Standard none, as UnityPy reads them (`tests/shader_properties.rs`, `tests/oracles/unitypy_shader_properties.py`).
+
 ## 0.2.1 (2026-10-29)
 
 - `Player::colour_space` reads the colour space a player's programs and textures work in, `player::ColourSpace` (`Gamma` or `Linear`), from its PlayerSettings' `m_ActiveColorSpace`; `None` for a player with no PlayerSettings. It reads that one field: for the Unity 6 players read (Sledding Game, PEAK, Big Walk) the package's PlayerSettings layout is 4 bytes short of the stored object, as UnityPy's is, so the whole object does not decode. SkateBIRD's, Sledding Game's, PEAK's and Big Walk's players are all `Linear`, as UnityPy reads them (`tests/player_settings.rs`).
