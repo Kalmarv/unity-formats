@@ -422,18 +422,23 @@ fn players_read_bundled_files_like_loose_ones() {
     }
 }
 
-/// The AnimatorControllers in the files of one PEAK level read whole, among them the two with an empty layer (`Ambience`'s
-/// first, `Scout`'s seventh): a state machine without states, whose entry node's one transition stores `0xFFFFFFFF` and
-/// so has no destination.
+/// The AnimatorControllers in the files of one PEAK level, and in PEAK's loose files beside them, read whole, among them
+/// the four with an empty layer (`Ambience`'s first, `Scout`'s seventh, one pair in the loose `resources.assets` and one
+/// in level 193's shared assets): a state machine without states, whose entry node's one transition stores `0xFFFFFFFF`
+/// and so has no destination.
 ///
-/// Expected values: an independent census (UnityPy over a bundle reader of its own) of the compiled controllers in 529
-/// serialized files of PEAK, Sledding Game, Big Walk and SkateBIRD: 699 controllers with 1,671 selector transitions, of
-/// which 16 store `0xFFFFFFFF`, each the only transition of an entry node of a machine without states, in `Ambience` and
-/// `Scout` of each of PEAK's seven level bundles and of its loose `resources.assets`. In `levels192-207` the closure of
-/// `BuildPlayer-Level_207` holds the shared assets of levels 193 (73 controllers), 200 (6) and 197 (none); the two are
-/// in level 193's.
+/// Expected values: UnityPy over a bundle reader of its own (`tests/oracles/unitypy_bundles.py`'s) counts the class 91
+/// objects of each file and reads `m_Destination` of every selector transition with the file's stored type trees. The
+/// closure of `BuildPlayer-Level_207` holds the shared assets of levels 193 (73 controllers), 200 (6) and 197 (none); 192's
+/// (4) is not in it. The player also holds PEAK's loose files, 102 more (`resources.assets` 43, `sharedassets0.assets`
+/// 1, `sharedassets1.assets` 6, `sharedassets3.assets` 27, `sharedassets4.assets` 25), so 181 in all. Of the 181
+/// controllers' selector transitions exactly four store `0xFFFFFFFF`, each the only transition of an entry node of a
+/// machine without states. An independent census of the compiled controllers of PEAK, Sledding Game, Big Walk and
+/// SkateBIRD (699 controllers, 1,671 selector transitions) finds 16 of them, in `Ambience` and `Scout` of each of PEAK's
+/// seven level bundles and of its loose `resources.assets`, and nowhere else.
 #[test]
 fn peak_controllers_read_including_the_layers_with_nothing_in_them() {
+    use std::collections::BTreeMap;
     use unity_formats::animator::UnityAnimatorController;
     use unity_formats::listing::list;
     use unity_formats::player::{BundleSpec, NodeSelection, Player};
@@ -449,8 +454,28 @@ fn peak_controllers_read_including_the_layers_with_nothing_in_them() {
     };
     let player = Player::open_with_bundles(&data, package, &[spec]).unwrap();
     let controllers = list(&player, Some(&["AnimatorController"])).unwrap();
-    // the closure holds the shared assets of levels 193 (73), 200 (6) and 197 (none); 192's are not in it
-    assert_eq!(controllers.entries.len(), 79);
+    let mut per_file: BTreeMap<&str, usize> = BTreeMap::new();
+    for e in &controllers.entries {
+        *per_file.entry(e.object.file.as_str()).or_default() += 1;
+    }
+    let bundled: usize = per_file
+        .iter()
+        .filter(|(file, _)| file.starts_with("buildplayer-"))
+        .map(|(_, n)| n)
+        .sum();
+    assert_eq!(
+        per_file,
+        BTreeMap::from([
+            ("buildplayer-level_193.sharedassets", 73),
+            ("buildplayer-level_200.sharedassets", 6),
+            ("resources.assets", 43),
+            ("sharedassets0.assets", 1),
+            ("sharedassets1.assets", 6),
+            ("sharedassets3.assets", 27),
+            ("sharedassets4.assets", 25),
+        ])
+    );
+    assert_eq!((bundled, controllers.entries.len()), (79, 181));
     let mut to_nowhere = Vec::new();
     for e in &controllers.entries {
         let c = UnityAnimatorController::read(&player, &e.object).unwrap();
@@ -466,11 +491,14 @@ fn peak_controllers_read_including_the_layers_with_nothing_in_them() {
             }
         }
     }
+    to_nowhere.sort();
     assert_eq!(
         to_nowhere,
         [
             "buildplayer-level_193.sharedassets/7070 \"Ambience\" machine 0",
             "buildplayer-level_193.sharedassets/7071 \"Scout\" machine 6",
+            "resources.assets/2439 \"Ambience\" machine 0",
+            "resources.assets/2441 \"Scout\" machine 6",
         ]
     );
 }
