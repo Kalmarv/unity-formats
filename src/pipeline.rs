@@ -2,7 +2,9 @@
 //! a script's fields): a pipeline asset's renderers and its lighting, shadow and texture settings
 //! ([`read_urp_settings`]), a renderer's features, layer masks and modes ([`read_urp_renderer`]), a renderer feature's
 //! `m_Active` ([`read_urp_feature_active`]) and the settings of the Decal and Full Screen Pass features
-//! ([`read_urp_decal_feature`], [`read_urp_full_screen_feature`]), and a camera's URP data ([`read_urp_camera`]).
+//! ([`read_urp_decal_feature`], [`read_urp_full_screen_feature`]), a camera's URP data ([`read_urp_camera`]), and the
+//! pipeline's global settings with the graphics settings they hold: its runtime shaders and its render graph settings
+//! ([`read_urp_global_settings`]).
 //!
 //! The field order is each class's declaration order in the Universal RP package. A field is a 4-byte value, or a
 //! bool padded to 4 bytes; an object reference is 12 bytes (a [`PPtr`]: file id and a 64-bit path id) and an array is
@@ -21,11 +23,16 @@
 //!   and every camera of their scenes reads to exactly its bytes, with the fields an independent reading makes
 //!   (tests/urp.rs). A length the layout does not account for is refused, and so is a renderer `m_AssetVersion`, a
 //!   Full Screen Pass `m_Version` or a camera `m_Version` other than the one read.
+//! - The global settings' layout (`m_AssetVersion` 10) and its graphics settings classes' are Universal RP 17.3's, Core
+//!   RP 17.3's and GPU Driven RP 17.3's, checked against PEAK's and Sledding Game's players: each object reads to exactly
+//!   its bytes, every entry of its managed-reference registry included (tests/urp.rs). A class whose layout is not
+//!   verified is refused by name (Big Walk's settings hold one of the game's own), as is another asset or class version.
 
 use crate::player::PPtr;
 use crate::reader::Reader;
 use crate::version::UnityVersion;
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 use crate::{Result, invalid};
 
@@ -697,6 +704,479 @@ pub fn read_urp_camera(bytes: &[u8]) -> Result<UnityUrpCamera> {
     }
     used_up(&r, WHAT)?;
     Ok(camera)
+}
+
+/// The script class of Universal RP's global settings (the object GraphicsSettings'
+/// `m_CurrentRenderPipelineGlobalSettings` names; [`crate::player::Player::urp_global_settings`]).
+pub const URP_GLOBAL_SETTINGS: &str = "UnityEngine.Rendering.Universal.UniversalRenderPipelineGlobalSettings";
+
+/// The `m_AssetVersion` of the global settings the layout is verified for.
+const GLOBAL_SETTINGS_VERSION: i32 = 10;
+
+/// The version of the managed-reference registry a script's `[SerializeReference]` fields are stored in.
+const REFERENCES_VERSION: i32 = 2;
+
+/// Universal RP's global settings as stored (`UniversalRenderPipelineGlobalSettings`, `m_AssetVersion` 10, Universal
+/// RP 17.3): the rendering layers and the graphics settings the pipeline reads its runtime resources and options from.
+/// The settings are `[SerializeReference]` entries, each stored once in the object's managed-reference registry with
+/// its class; every one is read to its last byte, so a class whose layout is not verified is refused by name
+/// ([`verified_graphics_settings`] lists the verified ones).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UnityUrpGlobalSettings {
+    /// `m_RenderingLayerNames`.
+    pub rendering_layer_names: Vec<String>,
+    /// `m_ValidRenderingLayers`.
+    pub valid_rendering_layers: u32,
+    /// The graphics settings (`m_Settings.m_RuntimeSettings.m_List`), in the list's order.
+    pub settings: Vec<UnityGraphicsSettings>,
+}
+
+/// One graphics settings entry (an `IRenderPipelineGraphicsSettings`) as stored.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UnityGraphicsSettings {
+    /// Its managed-reference id.
+    pub rid: i64,
+    /// Its class, `namespace.class` as the registry names it (a nested class `Outer/Inner`).
+    pub class: String,
+    /// The assembly the class is in.
+    pub assembly: String,
+    /// Its serialized fields, in declaration order, each by its name in the source.
+    pub fields: Vec<(&'static str, UnityField)>,
+}
+
+/// A field of a graphics settings entry.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnityField {
+    /// A 4-byte integer or enum value.
+    Int(i64),
+    /// A bool, padded to 4 bytes.
+    Bool(bool),
+    /// An object reference.
+    Ref(PPtr),
+    /// A list of object references.
+    Refs(Vec<PPtr>),
+    /// A list of colours (`Color[]`), RGBA.
+    Colours(Vec<[f32; 4]>),
+}
+
+/// How a field of a graphics settings class is stored.
+#[derive(Clone, Copy, Debug)]
+enum FieldKind {
+    /// A 4-byte value that must be this one: a class's `m_Version`, whose other values are other layouts.
+    Version(i32),
+    Int,
+    Bool,
+    Ref,
+    Refs,
+    Colours,
+}
+
+use FieldKind as F;
+
+/// The fields of `ShaderStrippingSetting`.
+const SHADER_STRIPPING_FIELDS: &[(&str, FieldKind)] = &[
+    ("m_Version", F::Version(0)),
+    ("m_ExportShaderVariants", F::Bool),
+    ("m_ShaderVariantLogLevel", F::Int),
+    ("m_StripRuntimeDebugShaders", F::Bool),
+];
+
+/// The graphics settings classes whose layout is verified, each with its serialized fields in declaration order
+/// (Universal RP 17.3's, Core RP 17.3's and GPU Driven RP 17.3's classes as Unity 6000.3's players store them): each
+/// reads to the byte where the registry's next entry starts on PEAK's and Sledding Game's players.
+const GRAPHICS_SETTINGS: [(&str, &[(&str, FieldKind)]); 18] = [
+    (
+        "UnityEngine.Rendering.Universal.UniversalRenderPipelineRuntimeTerrainShaders",
+        &[
+            ("m_Version", F::Version(0)),
+            ("m_TerrainDetailLit", F::Ref),
+            ("m_TerrainDetailGrassBillboard", F::Ref),
+            ("m_TerrainDetailGrass", F::Ref),
+        ],
+    ),
+    (
+        "UnityEngine.Rendering.URPReflectionProbeSettings",
+        &[
+            ("version", F::Version(1)),
+            ("useReflectionProbeRotation", F::Bool),
+        ],
+    ),
+    (
+        "UnityEngine.Rendering.VrsRenderPipelineRuntimeResources",
+        &[
+            ("m_TextureComputeShader", F::Ref),
+            ("m_VisualizationShader", F::Ref),
+            ("m_VisualizationLookupTable", F::Colours),
+            ("m_ConversionLookupTable", F::Colours),
+        ],
+    ),
+    (
+        "UnityEngine.Rendering.LightmapSamplingSettings",
+        &[
+            ("m_Version", F::Version(1)),
+            ("m_UseBicubicLightmapSampling", F::Bool),
+        ],
+    ),
+    (
+        URP_RENDER_GRAPH_SETTINGS,
+        &[
+            ("m_Version", F::Version(0)),
+            ("m_EnableRenderCompatibilityMode", F::Bool),
+        ],
+    ),
+    (
+        URP_RENDERER_RESOURCES,
+        &[
+            ("m_Version", F::Version(0)),
+            ("m_CopyDepthPS", F::Ref),
+            ("m_CameraMotionVector", F::Ref),
+            ("m_StencilDeferredPS", F::Ref),
+            ("m_ClusterDeferred", F::Ref),
+            ("m_StencilDitherMaskSeedPS", F::Ref),
+            ("m_DBufferClear", F::Ref),
+        ],
+    ),
+    (
+        "UnityEngine.Rendering.Universal.URPDefaultVolumeProfileSettings",
+        &[("m_Version", F::Version(0)), ("m_VolumeProfile", F::Ref)],
+    ),
+    (
+        "UnityEngine.Rendering.Universal.UniversalRenderPipelineRuntimeShaders",
+        &[
+            ("m_Version", F::Version(0)),
+            ("m_FallbackErrorShader", F::Ref),
+            ("m_BlitHDROverlay", F::Ref),
+            ("m_CoreBlitPS", F::Ref),
+            ("m_CoreBlitColorAndDepthPS", F::Ref),
+            ("m_SamplingPS", F::Ref),
+            ("m_TerrainDetailLit", F::Ref),
+            ("m_TerrainDetailGrassBillboard", F::Ref),
+            ("m_TerrainDetailGrass", F::Ref),
+        ],
+    ),
+    (
+        "UnityEngine.Rendering.Universal.UniversalRenderPipelineRuntimeXRResources",
+        &[
+            ("m_xrOcclusionMeshPS", F::Ref),
+            ("m_xrMirrorViewPS", F::Ref),
+            ("m_xrMotionVector", F::Ref),
+        ],
+    ),
+    (
+        "UnityEngine.Rendering.Universal.UniversalRenderPipelineDebugShaders",
+        &[
+            ("m_DebugReplacementPS", F::Ref),
+            ("m_HdrDebugViewPS", F::Ref),
+            ("m_ProbeVolumeSamplingDebugComputeShader", F::Ref),
+        ],
+    ),
+    (
+        "UnityEngine.Rendering.Universal.UniversalRenderPipelineRuntimeTextures",
+        &[
+            ("m_Version", F::Version(1)),
+            ("m_BlueNoise64LTex", F::Ref),
+            ("m_BayerMatrixTex", F::Ref),
+            ("m_DebugFontTex", F::Ref),
+        ],
+    ),
+    (
+        "UnityEngine.Rendering.RenderGraphGlobalSettings",
+        &[
+            ("m_version", F::Version(0)),
+            ("m_EnableCompilationCaching", F::Bool),
+            ("m_EnableValidityChecks", F::Bool),
+        ],
+    ),
+    (
+        "UnityEngine.Rendering.RenderGraphModule.Util.RenderGraphUtilsResources",
+        &[("m_Version", F::Version(0)), ("m_CoreCopyPS", F::Ref)],
+    ),
+    (
+        "UnityEngine.Rendering.ShaderStrippingSetting",
+        SHADER_STRIPPING_FIELDS,
+    ),
+    (
+        "UnityEngine.Rendering.GPUResidentDrawerResources",
+        &[
+            ("m_Version", F::Version(0)),
+            ("m_InstanceDataBufferCopyKernels", F::Ref),
+            ("m_InstanceDataBufferUploadKernels", F::Ref),
+            ("m_TransformUpdaterKernels", F::Ref),
+            ("m_WindDataUpdaterKernels", F::Ref),
+            ("m_OccluderDepthPyramidKernels", F::Ref),
+            ("m_InstanceOcclusionCullingKernels", F::Ref),
+            ("m_OcclusionCullingDebugKernels", F::Ref),
+            ("m_DebugOcclusionTestPS", F::Ref),
+            ("m_DebugOccluderPS", F::Ref),
+        ],
+    ),
+    (
+        "UnityEngine.Rendering.STP/RuntimeResources",
+        &[("m_setupCS", F::Ref), ("m_preTaaCS", F::Ref), ("m_taaCS", F::Ref)],
+    ),
+    (
+        "UnityEngine.Rendering.Universal.ScreenSpaceAmbientOcclusionPersistentResources",
+        &[("m_Shader", F::Ref), ("m_Version", F::Version(0))],
+    ),
+    (
+        "UnityEngine.Rendering.Universal.ScreenSpaceAmbientOcclusionDynamicResources",
+        &[("m_BlueNoise256Textures", F::Refs), ("m_Version", F::Version(0))],
+    ),
+];
+
+/// The graphics settings classes whose layout is verified ([`read_urp_global_settings`] refuses the others by name).
+pub fn verified_graphics_settings() -> impl Iterator<Item = &'static str> {
+    GRAPHICS_SETTINGS.iter().map(|(c, _)| *c)
+}
+
+/// The class of Universal RP's render graph settings.
+pub const URP_RENDER_GRAPH_SETTINGS: &str = "UnityEngine.Rendering.Universal.RenderGraphSettings";
+
+/// The class of the Universal Renderer's runtime resources.
+pub const URP_RENDERER_RESOURCES: &str = "UnityEngine.Rendering.Universal.UniversalRendererResources";
+
+/// The Universal Renderer's runtime shaders (`UniversalRendererResources`), each a `Shader` reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct UnityUrpRendererResources {
+    /// `m_CopyDepthPS`: the copy of the camera depth (`CopyDepthPass`).
+    pub copy_depth: PPtr,
+    /// `m_CameraMotionVector`.
+    pub camera_motion_vector: PPtr,
+    /// `m_StencilDeferredPS`.
+    pub stencil_deferred: PPtr,
+    /// `m_ClusterDeferred`.
+    pub cluster_deferred: PPtr,
+    /// `m_StencilDitherMaskSeedPS`.
+    pub stencil_dither_mask_seed: PPtr,
+    /// `m_DBufferClear`: the DBuffer's clear (`DBufferRenderPass`).
+    pub dbuffer_clear: PPtr,
+}
+
+impl UnityGraphicsSettings {
+    /// The field named `name`, where the class has one.
+    pub fn field(&self, name: &str) -> Option<&UnityField> {
+        self.fields.iter().find(|(n, _)| *n == name).map(|(_, v)| v)
+    }
+}
+
+impl UnityUrpGlobalSettings {
+    /// The entry of class `class`, where the list has one (a class is listed once).
+    pub fn entry(&self, class: &str) -> Option<&UnityGraphicsSettings> {
+        self.settings.iter().find(|s| s.class == class)
+    }
+
+    /// The Universal Renderer's runtime shaders, where the settings list them.
+    pub fn renderer_resources(&self) -> Option<UnityUrpRendererResources> {
+        let e = self.entry(URP_RENDERER_RESOURCES)?;
+        let r = |name: &str| match e.field(name) {
+            Some(UnityField::Ref(p)) => Some(*p),
+            _ => None,
+        };
+        Some(UnityUrpRendererResources {
+            copy_depth: r("m_CopyDepthPS")?,
+            camera_motion_vector: r("m_CameraMotionVector")?,
+            stencil_deferred: r("m_StencilDeferredPS")?,
+            cluster_deferred: r("m_ClusterDeferred")?,
+            stencil_dither_mask_seed: r("m_StencilDitherMaskSeedPS")?,
+            dbuffer_clear: r("m_DBufferClear")?,
+        })
+    }
+
+    /// The stored `m_EnableRenderCompatibilityMode` of the render graph settings, where the settings list them: whether
+    /// the project asks Universal RP to draw without the render graph. A build honours it only where its Universal RP
+    /// is compiled with `URP_COMPATIBILITY_MODE` ([`crate::player::Player::urp_compatibility_code`]); without, the
+    /// pipeline always draws through the render graph.
+    pub fn render_compatibility_mode(&self) -> Option<bool> {
+        match self
+            .entry(URP_RENDER_GRAPH_SETTINGS)?
+            .field("m_EnableRenderCompatibilityMode")
+        {
+            Some(UnityField::Bool(b)) => Some(*b),
+            _ => None,
+        }
+    }
+}
+
+/// One string: its byte count and its UTF-8 bytes padded to 4 bytes.
+fn string(r: &mut Reader, what: &str) -> Result<String> {
+    let len = list_len(r, what, 1)?;
+    let s = std::str::from_utf8(r.take(len)?)
+        .map_err(|_| invalid(format!("{what}: a string that is not UTF-8")))?
+        .to_owned();
+    r.align(4)?;
+    Ok(s)
+}
+
+/// The fields `fields` of an object of `class`, in order.
+fn settings_fields(
+    r: &mut Reader,
+    class: &str,
+    fields: &[(&'static str, FieldKind)],
+) -> Result<Vec<(&'static str, UnityField)>> {
+    fields
+        .iter()
+        .map(|&(name, kind)| {
+            let what = format!("{class}.{name}");
+            let value = match kind {
+                FieldKind::Version(want) => {
+                    let v = r.i32()?;
+                    if v != want {
+                        return Err(invalid(format!(
+                            "{what} {v}: only version {want} has a verified layout"
+                        )));
+                    }
+                    UnityField::Int(i64::from(v))
+                }
+                FieldKind::Int => UnityField::Int(i64::from(r.i32()?)),
+                FieldKind::Bool => UnityField::Bool(flag(r)?),
+                FieldKind::Ref => UnityField::Ref(pptr(r)?),
+                FieldKind::Refs => UnityField::Refs(pptrs(r, &what)?),
+                FieldKind::Colours => {
+                    let n = list_len(r, &what, 16)?;
+                    UnityField::Colours(
+                        (0..n)
+                            .map(|_| Ok([r.f32()?, r.f32()?, r.f32()?, r.f32()?]))
+                            .collect::<Result<_>>()?,
+                    )
+                }
+            };
+            Ok((name, value))
+        })
+        .collect()
+}
+
+/// An empty list, refused when it holds anything: its elements' layout is not verified (no player read stores any).
+fn empty_list(r: &mut Reader, what: &str) -> Result<()> {
+    match r.u32()? {
+        0 => Ok(()),
+        n => Err(invalid(format!(
+            "{what}: {n} entries, whose layout is not verified (only empty lists are read)"
+        ))),
+    }
+}
+
+/// The global settings whose script fields are `bytes` ([`URP_GLOBAL_SETTINGS`]), read to the last byte with every
+/// graphics settings entry of the registry: a class not in [`verified_graphics_settings`] is refused by name, as is an entry
+/// the list and the registry do not both hold.
+pub fn read_urp_global_settings(bytes: &[u8]) -> Result<UnityUrpGlobalSettings> {
+    const WHAT: &str = "Universal Render Pipeline global settings";
+    let mut r = Reader::new(bytes, false);
+    // the migration copies of the stripping settings and the obsolete flags, kept by the class and read past
+    settings_fields(&mut r, "m_ShaderStrippingSetting", SHADER_STRIPPING_FIELDS)?;
+    settings_fields(
+        &mut r,
+        "m_URPShaderStrippingSetting",
+        &[
+            ("m_Version", F::Version(0)),
+            ("m_StripUnusedPostProcessingVariants", F::Bool),
+            ("m_StripUnusedVariants", F::Bool),
+            ("m_StripScreenCoordOverrideVariants", F::Bool),
+        ],
+    )?;
+    settings_fields(
+        &mut r,
+        WHAT,
+        &[
+            ("m_ShaderVariantLogLevel", F::Int),
+            ("m_ExportShaderVariants", F::Bool),
+            ("m_StripDebugVariants", F::Bool),
+            ("m_StripUnusedPostProcessingVariants", F::Bool),
+            ("m_StripUnusedVariants", F::Bool),
+            ("m_StripScreenCoordOverrideVariants", F::Bool),
+            ("supportRuntimeDebugDisplay", F::Bool),
+            ("m_EnableRenderGraph", F::Bool),
+        ],
+    )?;
+    // m_Settings.m_RuntimeSettings.m_List: the entries' managed-reference ids
+    let n = list_len(&mut r, "m_Settings.m_RuntimeSettings.m_List", 8)?;
+    let list: Vec<i64> = (0..n).map(|_| r.i64()).collect::<Result<_>>()?;
+    let version = r.i32()?;
+    if version != GLOBAL_SETTINGS_VERSION {
+        return Err(invalid(format!(
+            "{WHAT} m_AssetVersion {version}: only version {GLOBAL_SETTINGS_VERSION} has a verified layout"
+        )));
+    }
+    pptr(&mut r)?; // m_ObsoleteDefaultVolumeProfile
+    let rendering_layer_names = strings(&mut r, "m_RenderingLayerNames")?;
+    let valid_rendering_layers = r.u32()?;
+    for i in 0..8 {
+        string(&mut r, &format!("lightLayerName{i}"))?;
+    }
+    // apvScenesData: two serialized dictionaries' key and value lists
+    for list in [
+        "obsoleteSceneBounds keys",
+        "obsoleteSceneBounds values",
+        "obsoleteHasProbeVolumes keys",
+        "obsoleteHasProbeVolumes values",
+    ] {
+        empty_list(&mut r, &format!("apvScenesData.{list}"))?;
+    }
+    // the managed-reference registry: each entry's id, class and fields
+    let registry = r.i32()?;
+    if registry != REFERENCES_VERSION {
+        return Err(invalid(format!(
+            "{WHAT}: managed-reference registry version {registry} (read: {REFERENCES_VERSION})"
+        )));
+    }
+    let n = list_len(&mut r, "the managed-reference registry", 20)?;
+    let mut entries: BTreeMap<i64, UnityGraphicsSettings> = BTreeMap::new();
+    for _ in 0..n {
+        let rid = r.i64()?;
+        let class = string(&mut r, "a managed reference's class")?;
+        let namespace = string(&mut r, "a managed reference's namespace")?;
+        let assembly = string(&mut r, "a managed reference's assembly")?;
+        let class = match namespace.as_str() {
+            "" => class,
+            ns => format!("{ns}.{class}"),
+        };
+        let (_, layout) = GRAPHICS_SETTINGS.iter().find(|(c, _)| *c == class).ok_or_else(|| {
+            invalid(format!(
+                "{WHAT}: a graphics settings entry of class {class} ({assembly}), whose layout is not verified"
+            ))
+        })?;
+        let fields = settings_fields(&mut r, &class, layout)?;
+        let entry = UnityGraphicsSettings {
+            rid,
+            class,
+            assembly,
+            fields,
+        };
+        if let Some(first) = entries.insert(rid, entry) {
+            return Err(invalid(format!(
+                "{WHAT}: managed reference {rid} stored twice ({})",
+                first.class
+            )));
+        }
+    }
+    used_up(&r, WHAT)?;
+    let settings = list
+        .iter()
+        .map(|rid| {
+            entries.remove(rid).ok_or_else(|| {
+                invalid(format!(
+                    "{WHAT}: the settings list names managed reference {rid}, which the registry does not hold"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if let Some(e) = entries.values().next() {
+        return Err(invalid(format!(
+            "{WHAT}: managed reference {} ({}) that the settings list does not name",
+            e.rid, e.class
+        )));
+    }
+    let mut classes = std::collections::BTreeSet::new();
+    for s in &settings {
+        if !classes.insert(s.class.as_str()) {
+            return Err(invalid(format!("{WHAT}: the class {} listed twice", s.class)));
+        }
+    }
+    Ok(UnityUrpGlobalSettings {
+        rendering_layer_names,
+        valid_rendering_layers,
+        settings,
+    })
 }
 
 #[cfg(test)]

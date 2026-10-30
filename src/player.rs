@@ -47,6 +47,11 @@ const MANAGERS: &str = "globalgamemanagers";
 /// The script class of Universal Render Pipeline's asset (`m_Namespace.m_ClassName` of its MonoScript).
 pub const URP_ASSET: &str = "UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset";
 
+/// The literal Universal RP 17.3's pipeline logs in a player as it starts, saying whether it draws through the render
+/// graph (`RenderGraph is now enabled.` or `disabled.`): `UniversalRenderPipeline`'s constructor holds it, and the
+/// choice it reports, only when compiled with `URP_COMPATIBILITY_MODE` ([`Player::urp_compatibility_code`]).
+pub const URP_COMPATIBILITY_LOG: &str = "RenderGraph is now ";
+
 /// The render pipeline a player draws with: GraphicsSettings' default pipeline asset (`m_CustomRenderPipeline`), or a
 /// quality level's own (`customRenderPipeline`) where it sets one. Which quality level runs is the user's choice, so
 /// the pipeline is known only when every level gives the same kind.
@@ -592,6 +597,69 @@ impl Player {
     pub fn urp_settings(&self, asset: &ObjRef) -> Result<crate::pipeline::UnityUrpSettings> {
         let layout = crate::pipeline::UrpAssetLayout::of(self.file(&asset.file)?.unity)?;
         crate::pipeline::read_urp_settings(&self.behaviour(asset)?.1, layout)
+    }
+
+    /// Universal RP's global settings: the object GraphicsSettings' `m_CurrentRenderPipelineGlobalSettings` names, read
+    /// with [`crate::pipeline::read_urp_global_settings`]. `None` when the player has no GraphicsSettings or it names
+    /// none; an object of another class is refused, naming it.
+    pub fn urp_global_settings(&self) -> Result<Option<crate::pipeline::UnityUrpGlobalSettings>> {
+        let Some(graphics) = self.manager("GraphicsSettings")? else {
+            return Ok(None);
+        };
+        let Some(r) = graphics
+            .get("m_CurrentRenderPipelineGlobalSettings")
+            .map(|p| self.resolve(MANAGERS, p))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        let class = self.script_class(&r)?.unwrap_or_default();
+        if class != crate::pipeline::URP_GLOBAL_SETTINGS {
+            return Err(invalid(format!(
+                "{}/{}: the render pipeline's global settings are a {class:?}, not Universal RP's",
+                r.file, r.path_id
+            )));
+        }
+        crate::pipeline::read_urp_global_settings(&self.behaviour(&r)?.1).map(Some)
+    }
+
+    /// Whether the player's Universal RP is compiled with `URP_COMPATIBILITY_MODE`, the define without which it ignores
+    /// a stored Compatibility Mode ([`crate::pipeline::UnityUrpGlobalSettings::render_compatibility_mode`]) and always
+    /// draws through the render graph: whether its code holds the literal of the log line its pipeline writes only under
+    /// the define ([`URP_COMPATIBILITY_LOG`]). The code is the Mono player's `Managed/Unity.RenderPipelines.Universal.Runtime.dll`
+    /// (the literal in UTF-16, as the assembly's user strings hold it) or the IL2CPP player's
+    /// `il2cpp_data/Metadata/global-metadata.dat` (in UTF-8, as its string literals hold it); `None` when the player has
+    /// neither.
+    pub fn urp_compatibility_code(&self) -> Result<Option<bool>> {
+        let read = |path: PathBuf| -> Result<Option<Vec<u8>>> {
+            match std::fs::read(&path) {
+                Ok(b) => Ok(Some(b)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(source) => Err(Error::Io { path, source }),
+            }
+        };
+        let holds = |bytes: &[u8], needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        if let Some(dll) = read(
+            self.dir
+                .join("Managed")
+                .join("Unity.RenderPipelines.Universal.Runtime.dll"),
+        )? {
+            let utf16: Vec<u8> = URP_COMPATIBILITY_LOG
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            return Ok(Some(holds(&dll, &utf16)));
+        }
+        if let Some(metadata) = read(
+            self.dir
+                .join("il2cpp_data")
+                .join("Metadata")
+                .join("global-metadata.dat"),
+        )? {
+            return Ok(Some(holds(&metadata, URP_COMPATIBILITY_LOG.as_bytes())));
+        }
+        Ok(None)
     }
 
     /// The quality levels of `globalgamemanagers`' QualitySettings, in order, each with its name and the skin weights

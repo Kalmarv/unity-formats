@@ -67,6 +67,22 @@ fn expected(oracle: &Json, what: &str, drop: &[&str]) -> Json {
     v
 }
 
+/// The player in `data`, read with the type tree package `tpk`: a player whose files are one bundle (Big Walk's
+/// `data.unity3d`) through it.
+fn open(data: &std::path::Path, tpk: &[u8]) -> Player {
+    let package = TypeTreePackage::parse(tpk).unwrap();
+    let bundle = data.join("data.unity3d");
+    if bundle.exists() {
+        let spec = BundleSpec {
+            path: &bundle,
+            nodes: NodeSelection::All,
+        };
+        Player::open_with_bundles(data, package, &[spec]).unwrap()
+    } else {
+        Player::open(data, package).unwrap()
+    }
+}
+
 /// An object resolved from a reference its holder stores.
 fn follow(player: &Player, holder: &ObjRef, pptr: PPtr) -> ObjRef {
     player.resolve_pptr(&holder.file, pptr).unwrap().unwrap()
@@ -83,18 +99,7 @@ fn urp_objects_read_as_unitypy_reads_them() {
             continue;
         };
         let want: Json = serde_json::from_slice(&std::fs::read(&oracle_file).unwrap()).unwrap();
-        let package = TypeTreePackage::parse(&tpk).unwrap();
-        // a player whose files are one bundle (Big Walk's `data.unity3d`) is read through it
-        let bundle = data.join("data.unity3d");
-        let player = if bundle.exists() {
-            let spec = BundleSpec {
-                path: &bundle,
-                nodes: NodeSelection::All,
-            };
-            Player::open_with_bundles(&data, package, &[spec]).unwrap()
-        } else {
-            Player::open(&data, package).unwrap()
-        };
+        let player = open(&data, &tpk);
 
         // the assets the oracle found, and the renderers and features followed from them here
         let mut renderers = BTreeMap::new();
@@ -241,5 +246,146 @@ fn urp_objects_read_as_unitypy_reads_them() {
             features.len(),
             cameras.len()
         );
+    }
+}
+
+/// Universal RP's global settings (`Player::urp_global_settings`), each read to its last byte with every entry of its
+/// managed-reference registry, against an independent reading of the same bytes in the classes' declaration order:
+/// PEAK's 16 entries and Sledding Game's 16 in their list's order, the renderer's runtime shaders they name (CopyDepth
+/// and DBufferClear, followed to the shaders) and the stored Compatibility Mode, false on PEAK and true on Sledding Game.
+/// Whether the player's Universal RP honours it is its code's: Sledding Game's IL2CPP metadata holds the log line the
+/// pipeline writes only under `URP_COMPATIBILITY_MODE`, PEAK's Mono assembly does not. Big Walk's settings hold a
+/// class of the game's own (`MA.Flora.FloraRuntimeSettings`), refused by name.
+#[test]
+fn urp_global_settings_read_to_their_last_byte() {
+    let Some(tpk) = tool(Tool::UnityTpk) else { return };
+    let tpk = std::fs::read(tpk).unwrap();
+    let layers: Vec<String> = std::iter::once("Light Layer default".to_owned())
+        .chain((1..8).map(|i| format!("Light Layer {i}")))
+        .collect();
+    for game in PLAYERS {
+        let Some(data) = data_folder(game) else { continue };
+        let player = open(&data, &tpk);
+        let code = player.urp_compatibility_code().unwrap();
+        let read = player.urp_global_settings();
+        let (classes, copy_depth, dbuffer_clear, compatibility, receive_decals, valid): (
+            &[&str],
+            i64,
+            i64,
+            bool,
+            bool,
+            u32,
+        ) = match game {
+            Game::Peak => (
+                &[
+                    "Universal.RenderGraphSettings",
+                    "Universal.UniversalRendererResources",
+                    "Universal.URPDefaultVolumeProfileSettings",
+                    "Universal.UniversalRenderPipelineRuntimeShaders",
+                    "Universal.UniversalRenderPipelineRuntimeXRResources",
+                    "Universal.UniversalRenderPipelineDebugShaders",
+                    "Universal.UniversalRenderPipelineRuntimeTextures",
+                    "GPUResidentDrawerResources",
+                    "RenderGraphGlobalSettings",
+                    "STP/RuntimeResources",
+                    "RenderGraphModule.Util.RenderGraphUtilsResources",
+                    "ShaderStrippingSetting",
+                    "Universal.UniversalRenderPipelineRuntimeTerrainShaders",
+                    "URPReflectionProbeSettings",
+                    "VrsRenderPipelineRuntimeResources",
+                    "LightmapSamplingSettings",
+                ],
+                194,
+                207,
+                false,
+                true,
+                511,
+            ),
+            Game::Sledding => (
+                &[
+                    "Universal.UniversalRendererResources",
+                    "Universal.UniversalRenderPipelineDebugShaders",
+                    "Universal.UniversalRenderPipelineRuntimeShaders",
+                    "Universal.UniversalRenderPipelineRuntimeTextures",
+                    "Universal.URPDefaultVolumeProfileSettings",
+                    "Universal.RenderGraphSettings",
+                    "ShaderStrippingSetting",
+                    "RenderGraphGlobalSettings",
+                    "RenderGraphModule.Util.RenderGraphUtilsResources",
+                    "Universal.UniversalRenderPipelineRuntimeXRResources",
+                    "Universal.ScreenSpaceAmbientOcclusionPersistentResources",
+                    "Universal.ScreenSpaceAmbientOcclusionDynamicResources",
+                    "LightmapSamplingSettings",
+                    "VrsRenderPipelineRuntimeResources",
+                    "Universal.UniversalRenderPipelineRuntimeTerrainShaders",
+                    "URPReflectionProbeSettings",
+                ],
+                146,
+                154,
+                true,
+                false,
+                0,
+            ),
+            _ => {
+                let why = read.unwrap_err().to_string();
+                assert!(
+                    why.contains("of class MA.Flora.FloraRuntimeSettings"),
+                    "{game:?}: {why}"
+                );
+                assert_eq!(code, Some(false), "{game:?}");
+                continue;
+            }
+        };
+        let settings = read.unwrap().unwrap();
+        assert_eq!(
+            settings
+                .settings
+                .iter()
+                .map(|s| s.class.as_str())
+                .collect::<Vec<_>>(),
+            classes
+                .iter()
+                .map(|c| format!("UnityEngine.Rendering.{c}"))
+                .collect::<Vec<_>>(),
+            "{game:?}"
+        );
+        let mut names = layers.clone();
+        if receive_decals {
+            names.push("Receive Decals".into());
+        }
+        assert_eq!(settings.rendering_layer_names, names, "{game:?}");
+        assert_eq!(settings.valid_rendering_layers, valid, "{game:?}");
+        let resources = settings.renderer_resources().unwrap();
+        for (pptr, path_id, shader) in [
+            (
+                resources.copy_depth,
+                copy_depth,
+                "Hidden/Universal Render Pipeline/CopyDepth",
+            ),
+            (
+                resources.dbuffer_clear,
+                dbuffer_clear,
+                "Hidden/Universal Render Pipeline/DBufferClear",
+            ),
+        ] {
+            assert_eq!(pptr, PPtr { file_id: 0, path_id }, "{game:?} {shader}");
+            let r = ObjRef {
+                file: "globalgamemanagers.assets".into(),
+                path_id,
+            };
+            assert_eq!(player.class_name(&r), Some("Shader"), "{game:?} {shader}");
+            let form = player.field(&r, "m_ParsedForm").unwrap().unwrap();
+            assert_eq!(
+                form.get("m_Name").and_then(unity_formats::value::Value::as_str),
+                Some(shader),
+                "{game:?}"
+            );
+        }
+        assert_eq!(
+            settings.render_compatibility_mode(),
+            Some(compatibility),
+            "{game:?}"
+        );
+        assert_eq!(code, Some(compatibility), "{game:?}");
     }
 }
