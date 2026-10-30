@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-10-30)
 
 - **Breaking:** `pipeline::read_urp_settings` takes the asset's layout (`pipeline::UrpAssetLayout`), which `UrpAssetLayout::of` identifies from the player's Unity version before any field is read, and reads every field of it to the asset's last byte; `Player::urp_settings` reads an asset of a player so. The layout is Universal RP 17.3's, verified on the Unity 6000.3.12f1 (Sledding Game) and 6000.3.15f1 (PEAK) players, whose every asset reads to exactly its bytes; a player of another version is refused by name. Big Walk's (6000.3.17f1) assets differ after `m_ReflectionProbeBlending`, where the reader used to read a value no bool holds.
 - **Breaking:** `pipeline::UnityUrpSettings` has the asset's renderers (`renderers`, `m_RendererDataList`), the default renderer's index, whether it makes the depth and opaque textures and its MSAA sample count; a default renderer index outside the list and an MSAA count other than 1, 2, 4 or 8 are refused.
