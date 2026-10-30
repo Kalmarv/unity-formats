@@ -546,22 +546,7 @@ impl Scene {
                 continue;
             }
             let (base, data) = player.behaviour(&r)?;
-            let script = match base.get("m_Script") {
-                Some(p) => match player.resolve(&r.file, p)? {
-                    Some(s) => {
-                        let s = player.decode(&s)?;
-                        let field = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
-                        let (ns, class) = (field("m_Namespace"), field("m_ClassName"));
-                        if ns.is_empty() {
-                            class
-                        } else {
-                            format!("{ns}.{class}")
-                        }
-                    }
-                    None => String::new(),
-                },
-                None => String::new(),
-            };
+            let script = player.script_class_of(&r.file, &base)?.unwrap_or_default();
             out.push(UnityBehaviour {
                 behaviour: r.clone(),
                 script,
@@ -1319,11 +1304,13 @@ impl Scene {
         let mut out = Vec::new();
         for o in f.objects.iter().filter(|o| class(o.path_id) == "Camera") {
             let c = player.decode(&r(o.path_id))?;
-            let Some(tp) = self.transform_of(path_id(&c, "m_GameObject")?) else {
+            let game_object = path_id(&c, "m_GameObject")?;
+            let Some(tp) = self.transform_of(game_object) else {
                 continue;
             };
             out.push(CameraComponent {
                 camera: r(o.path_id),
+                game_object,
                 path: self.path(tp),
                 world: self.world_of(tp)?,
                 culling_mask: culling_mask(&c, o.path_id)?,
@@ -1522,6 +1509,9 @@ pub struct LightComponent {
 pub struct CameraComponent {
     /// The Camera object.
     pub camera: ObjRef,
+    /// Its GameObject's path id in the scene's file (whose MonoBehaviours, [`Scene::behaviours_of`], hold a Universal
+    /// Render Pipeline camera's URP data).
+    pub game_object: i64,
     /// Its GameObject's path from the scene root, names joined by `/`.
     pub path: String,
     /// Its GameObject's world matrix.

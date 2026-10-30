@@ -1,4 +1,5 @@
-//! Lists a Unity player's scenes and reads a few of its meshes.
+//! Lists a Unity player's scenes, reads a few of its meshes and, for a Universal Render Pipeline player, its default
+//! renderer.
 //!
 //! `cargo run --example inspect_player -- <the game's *_Data folder> <a type tree package (.tpk)> [<a bundle>...]`
 //!
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 use unity_formats::TypeTreePackage;
 use unity_formats::listing::list;
 use unity_formats::mesh::UnityMeshData;
+use unity_formats::pipeline::{read_urp_feature_active, read_urp_renderer};
 use unity_formats::player::{BundleSpec, NodeSelection, Player};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,6 +48,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             mesh.indices.len(),
             mesh.submeshes.len()
         );
+    }
+    // the Universal Render Pipeline asset every quality level draws with, and the renderer its cameras use by default
+    if let Some(asset) = player.urp_asset(None)? {
+        let settings = player.urp_settings(&asset)?;
+        let default = settings
+            .renderers
+            .get(usize::try_from(settings.default_renderer)?);
+        if let Some(r) = default
+            .map(|p| player.resolve_pptr(&asset.file, *p))
+            .transpose()?
+            .flatten()
+        {
+            let renderer = read_urp_renderer(&player.behaviour(&r)?.1)?;
+            println!(
+                "URP renderer {}/{}: rendering mode {}, depth priming {}, copy depth {}",
+                r.file,
+                r.path_id,
+                renderer.rendering_mode,
+                renderer.depth_priming_mode,
+                renderer.copy_depth_mode
+            );
+            for p in &renderer.features {
+                let Some(f) = player.resolve_pptr(&r.file, *p)? else {
+                    continue;
+                };
+                let active = read_urp_feature_active(&player.behaviour(&f)?.1)?;
+                let class = player.script_class(&f)?.unwrap_or_default();
+                println!("  feature {class}{}", if active { "" } else { " (off)" });
+            }
+        }
     }
     Ok(())
 }

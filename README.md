@@ -2,12 +2,13 @@
 
 A Rust library that reads the data files of Unity games: the SerializedFiles a built player keeps its scenes and assets in, and the meshes, textures, materials, shader programs, terrains and animation data inside them.
 
-It reads SerializedFile containers (versions 21 and 22) and UnityFS bundles (AssetBundles, Addressables content, a player's `data.unity3d`), decodes their objects through the type trees a file stores or, for a player build that strips them, through a type tree package (a TPK file you supply), and follows pointers across a player's files and streamed `.resS` data, loose or bundled. On top of that it reads scenes (GameObjects, Transforms composed to world matrices, renderers, lights, cameras, colliders, terrains, ambient and fog settings), meshes (vertex streams, compressed meshes, skins, blend shapes), `Texture2D` pixels and mip chains, materials, a Shader's render state and compiled program variants, terrains, Avatars, AnimatorControllers and AnimationClips, and the lighting settings of a Universal Render Pipeline asset. It was written against Unity 2019.4 and Unity 6 players: SkateBIRD (2019.4.20f1), Sledding Game (6000.3.12f1), PEAK (6000.3.15f1) and Big Walk (6000.3.17f1).
+It reads SerializedFile containers (versions 21 and 22) and UnityFS bundles (AssetBundles, Addressables content, a player's `data.unity3d`), decodes their objects through the type trees a file stores or, for a player build that strips them, through a type tree package (a TPK file you supply), and follows pointers across a player's files and streamed `.resS` data, loose or bundled. On top of that it reads scenes (GameObjects, Transforms composed to world matrices, renderers, lights, cameras, colliders, terrains, ambient and fog settings), meshes (vertex streams, compressed meshes, skins, blend shapes), `Texture2D` pixels and mip chains, materials, a Shader's render state and compiled program variants, terrains, Avatars, AnimatorControllers and AnimationClips, and the Universal Render Pipeline's objects: a pipeline asset's renderers and settings, a renderer's features, layer masks and modes, the Decal and Full Screen Pass features' settings and a camera's URP data. It was written against Unity 2019.4 and Unity 6 players: SkateBIRD (2019.4.20f1), Sledding Game (6000.3.12f1), PEAK (6000.3.15f1) and Big Walk (6000.3.17f1).
 
 ## Example
 
 ```rust,no_run
 use std::path::Path;
+use unity_formats::pipeline::read_urp_renderer;
 use unity_formats::{TypeTreePackage, listing::list, mesh::UnityMeshData, player::Player};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,6 +22,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for entry in list(&player, Some(&["Mesh"]))?.entries.iter().take(3) {
         let mesh = UnityMeshData::read(&player, &entry.object)?;
         println!("{}: {} vertices", mesh.name, mesh.vertex_count);
+    }
+    // the Universal Render Pipeline asset every quality level draws with, and the renderer its cameras use by default
+    if let Some(asset) = player.urp_asset(None)? {
+        let settings = player.urp_settings(&asset)?;
+        let default = settings.renderers.get(usize::try_from(settings.default_renderer)?);
+        if let Some(r) = default.map(|p| player.resolve_pptr(&asset.file, *p)).transpose()?.flatten() {
+            let renderer = read_urp_renderer(&player.behaviour(&r)?.1)?;
+            println!("rendering mode {}, {} features", renderer.rendering_mode, renderer.features.len());
+        }
     }
     Ok(())
 }

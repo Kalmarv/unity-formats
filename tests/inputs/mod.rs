@@ -134,6 +134,24 @@ primase_testdata::inputs! {
             about: r#"the colour space Big Walk's PlayerSettings states (`m_ActiveColorSpace`, JSON; tests/oracles/unitypy_player_settings.py makes it, tests/player_settings.rs compares)"#,
             source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_player_settings.py"#,
         },
+        Query::Oracle(OracleSet::UnityPy, Game::Peak, "urp.json") => {
+            status: Live,
+            gate: true,
+            about: r#"PEAK's Universal Render Pipeline objects: its pipeline asset's renderers and settings, the renderers' fields and features, and every camera's URP data in its scene files (JSON; tests/oracles/unitypy_urp.py makes it, tests/urp.rs compares)"#,
+            source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy) for the objects and scripts, decoded by tests/oracles/unitypy_urp.py"#,
+        },
+        Query::Oracle(OracleSet::UnityPy, Game::Sledding, "urp.json") => {
+            status: Live,
+            gate: true,
+            about: r#"Sledding Game's Universal Render Pipeline objects: its pipeline assets' renderers and settings, the renderer's fields and features, and every camera's URP data in its scene files (JSON; tests/oracles/unitypy_urp.py makes it, tests/urp.rs compares)"#,
+            source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy) for the objects and scripts, decoded by tests/oracles/unitypy_urp.py"#,
+        },
+        Query::Oracle(OracleSet::UnityPy, Game::Bigwalk, "urp.json") => {
+            status: Live,
+            gate: true,
+            about: r#"Big Walk's Universal Render Pipeline objects, read from its `data.unity3d`: its pipeline assets' renderers and settings, the renderers' fields and features, and every camera's URP data in its scene files (JSON; tests/oracles/unitypy_urp.py makes it, tests/urp.rs compares)"#,
+            source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy) for the objects and scripts, decoded by tests/oracles/unitypy_urp.py"#,
+        },
     }
     debug {}
 }

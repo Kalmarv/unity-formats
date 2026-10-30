@@ -29,6 +29,17 @@ pub struct ObjRef {
     pub path_id: i64,
 }
 
+/// An object reference as stored (a `PPtr`): the file id, 0 for the file that holds it and otherwise one more than the
+/// index of an external file in that file's list, and the object's path id, 0 for a null reference. A script's
+/// serialized fields store references this way in 12 bytes; [`Player::resolve_pptr`] finds the object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+pub struct PPtr {
+    /// `m_FileID`.
+    pub file_id: i32,
+    /// `m_PathID`.
+    pub path_id: i64,
+}
+
 /// The file that holds a player's manager objects (its BuildSettings, GraphicsSettings, QualitySettings and
 /// PlayerSettings).
 const MANAGERS: &str = "globalgamemanagers";
@@ -511,23 +522,11 @@ impl Player {
 
     /// A pipeline asset's script class (`namespace.class`).
     fn pipeline_class(&self, asset: &ObjRef) -> Result<String> {
-        let (base, _) = self.behaviour(asset)?;
-        let script = base
-            .get("m_Script")
-            .map(|p| self.resolve(&asset.file, p))
-            .transpose()?
-            .flatten()
-            .ok_or_else(|| {
-                invalid(format!(
-                    "{}/{}: pipeline asset without a script",
-                    asset.file, asset.path_id
-                ))
-            })?;
-        let s = self.decode(&script)?;
-        let field = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("");
-        Ok(match field("m_Namespace") {
-            "" => field("m_ClassName").to_owned(),
-            ns => format!("{ns}.{}", field("m_ClassName")),
+        self.script_class(asset)?.ok_or_else(|| {
+            invalid(format!(
+                "{}/{}: pipeline asset without a script",
+                asset.file, asset.path_id
+            ))
         })
     }
 
@@ -585,6 +584,14 @@ impl Player {
             }
         }
         Ok(found.cloned())
+    }
+
+    /// The settings of the Universal Render Pipeline asset `asset` ([`Player::urp_asset`]), read in the layout its file's
+    /// Unity version identifies ([`crate::pipeline::UrpAssetLayout::of`]) before any field is read: a version whose
+    /// layout is not verified is refused, naming it.
+    pub fn urp_settings(&self, asset: &ObjRef) -> Result<crate::pipeline::UnityUrpSettings> {
+        let layout = crate::pipeline::UrpAssetLayout::of(self.file(&asset.file)?.unity)?;
+        crate::pipeline::read_urp_settings(&self.behaviour(asset)?.1, layout)
     }
 
     /// The quality levels of `globalgamemanagers`' QualitySettings, in order, each with its name and the skin weights
@@ -655,7 +662,7 @@ impl Player {
         Ok(found)
     }
 
-    /// The object a `PPtr` (`m_FileID`, `m_PathID`) found in `file` points at; `None` for a null pointer.
+    /// The object a decoded `PPtr` (`m_FileID`, `m_PathID`) found in `file` points at; `None` for a null pointer.
     pub fn resolve(&self, file: &str, pptr: &Value) -> Result<Option<ObjRef>> {
         let fid = pptr
             .get("m_FileID")
@@ -665,20 +672,34 @@ impl Player {
             .get("m_PathID")
             .and_then(Value::as_i64)
             .ok_or_else(|| invalid("PPtr without m_PathID"))?;
-        if pid == 0 {
+        let file_id = i32::try_from(fid).map_err(|_| invalid(format!("{file}: PPtr file id {fid}")))?;
+        self.resolve_pptr(
+            file,
+            PPtr {
+                file_id,
+                path_id: pid,
+            },
+        )
+    }
+
+    /// The object a stored reference found in `file` points at (for one a script's fields store, read as bytes);
+    /// `None` for a null reference.
+    pub fn resolve_pptr(&self, file: &str, pptr: PPtr) -> Result<Option<ObjRef>> {
+        let PPtr { file_id, path_id } = pptr;
+        if path_id == 0 {
             return Ok(None);
         }
-        let target = if fid == 0 {
+        let target = if file_id == 0 {
             file.to_owned()
         } else {
             let f = self.file(file)?;
-            let ext = fid
+            let ext = file_id
                 .checked_sub(1)
                 .and_then(|i| usize::try_from(i).ok())
                 .and_then(|i| f.externals.get(i))
                 .ok_or_else(|| {
                     invalid(format!(
-                        "{file}: PPtr file id {fid} of {} externals",
+                        "{file}: PPtr file id {file_id} of {} externals",
                         f.externals.len()
                     ))
                 })?;
@@ -686,7 +707,32 @@ impl Player {
         };
         Ok(Some(ObjRef {
             file: target,
-            path_id: pid,
+            path_id,
+        }))
+    }
+
+    /// The script class of a MonoBehaviour (`namespace.class` of the MonoScript its `m_Script` names, the class alone
+    /// for a script without a namespace); `None` when it names no script.
+    pub fn script_class(&self, behaviour: &ObjRef) -> Result<Option<String>> {
+        let (base, _) = self.behaviour(behaviour)?;
+        self.script_class_of(&behaviour.file, &base)
+    }
+
+    /// The script class the decoded base fields `base` of a MonoBehaviour in `file` name ([`Player::script_class`]).
+    pub(crate) fn script_class_of(&self, file: &str, base: &Value) -> Result<Option<String>> {
+        let Some(script) = base
+            .get("m_Script")
+            .map(|p| self.resolve(file, p))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        let s = self.decode(&script)?;
+        let field = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("");
+        Ok(Some(match field("m_Namespace") {
+            "" => field("m_ClassName").to_owned(),
+            ns => format!("{ns}.{}", field("m_ClassName")),
         }))
     }
 }
