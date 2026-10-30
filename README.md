@@ -80,6 +80,11 @@ CONTRIBUTING.md says how to build, and how to report a file this library cannot 
 
 The asset-conversion library [primase](https://github.com/Kalmarv/primase) is built on this crate.
 
+## Check the examples
+
+From the repository root, `cargo test -p unity-formats --doc` checks the crate documentation, and
+`cargo build -p unity-formats --examples` builds its example programs. Examples that read paths need the caller's files; the repository ships no game assets.
+
 ## License
 
 GPL-3.0-or-later, see [LICENSE](LICENSE).
