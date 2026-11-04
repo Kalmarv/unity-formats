@@ -793,6 +793,27 @@ impl ShaderPrograms {
         Self::code_of(&entry)
     }
 
+    /// The parameters variant `v` of `pass` is compiled with: its own (before 2021.2), else the pass's common ones
+    /// merged with those of its parameter blob entry in the blob for `platform` (2021.2 on), else the pass's.
+    pub fn variant_parameters(
+        &self,
+        cache: &mut Segments,
+        platform: i64,
+        pass: &PassProgram,
+        v: &Variant,
+    ) -> Result<Parameters> {
+        if let Some(own) = &v.parameters {
+            return Ok(own.clone());
+        }
+        Ok(match v.parameter_blob {
+            Some(i) => merge_parameters(
+                &pass.parameters,
+                &parameter_blob(&self.entry_with(cache, platform, i)?)?,
+            ),
+            None => pass.parameters.clone(),
+        })
+    }
+
     /// The bytes of blob entry `index` of the blob for `platform`, as stored.
     pub fn entry_with(&self, cache: &mut Segments, platform: i64, index: u32) -> Result<Vec<u8>> {
         let p = self
