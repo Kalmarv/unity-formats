@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- The `mesh_keys` example lists the XXH3-128 keys of every Mesh's vertex streams, whole vertex data and index buffer in a player, as `key<TAB>bytes<TAB>name` lines that `locum-cli index --keys` reads, so the buffers of a frame captured from the game are named by the meshes they came from. A stream's stride is the sum of its channels' sizes by the vertex format enum of the player's Unity version (before 2017, 2017 and 2018, 2019 on) and each stream starts 16-byte aligned; every one of SkateBIRD's 7,491 and Hollow Knight's 3,941 meshes lays out to its stored bytes so. A SkateBIRD title-screen capture (D3D11) has 183 of its 209 buffers named this way, and Hollow Knight's D3D12 captures name the built-in `Plane`'s vertex and index buffers.
+- The `mesh_keys` example lists the XXH3-128 keys of every Mesh's vertex streams, whole vertex data and index buffer in a player, as `key<TAB>bytes<TAB>name` lines that `locum-cli index --keys` reads, so the buffers of a frame captured from the game are named by the meshes they came from. A stream's stride is the sum of its channels' sizes by Unity 2019 on's vertex formats and each stream starts 16-byte aligned; every one of SkateBIRD's (Unity 2019.4) 7,491 and Hollow Knight's (Unity 6000.0) 3,941 meshes lays out to its stored bytes so, and a mesh that does not is reported and keyed whole. A SkateBIRD title-screen capture (D3D11) has 183 of its 209 buffers named this way, and Hollow Knight's D3D12 captures name the built-in `Plane`'s vertex and index buffers.
 
 ## 0.3.1 (2026-10-30)
 

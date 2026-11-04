@@ -17,26 +17,21 @@ use unity_formats::listing::list;
 use unity_formats::player::Player;
 use unity_formats::resource::StreamingInfo;
 use unity_formats::value::Array;
-use unity_formats::{TypeTreePackage, UnityVersion, Value};
+use unity_formats::{TypeTreePackage, Value};
 use xxhash_rust::xxh3::xxh3_128;
 
-/// The size of one component of a vertex channel's `format`, by the vertex format enum of the player's Unity version.
-fn component_size(unity: UnityVersion, format: i64) -> Option<usize> {
-    let sizes: &[usize] = match unity.major() {
-        // VertexChannelFormat: Float, Float16, Color, Byte, UInt32
-        ..2017 => &[4, 2, 1, 1, 4],
-        // VertexFormat 2017: Float, Float16, Color, UNorm8, SNorm8, UNorm16, SNorm16, UInt8, SInt8, UInt16, SInt16,
-        // UInt32, SInt32
-        2017 | 2018 => &[4, 2, 1, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4],
-        // VertexFormat: Float, Float16, UNorm8, SNorm8, UNorm16, SNorm16, UInt8, SInt8, UInt16, SInt16, UInt32, SInt32
-        _ => &[4, 2, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4],
-    };
-    sizes.get(usize::try_from(format).ok()?).copied()
+/// The size of one component of a vertex channel's `format` (Unity 2019 on's VertexFormat: Float, Float16, UNorm8,
+/// SNorm8, UNorm16, SNorm16, UInt8, SInt8, UInt16, SInt16, UInt32, SInt32). Earlier versions number the formats
+/// otherwise; a mesh whose channels do not lay out its bytes is reported and keyed whole.
+fn component_size(format: i64) -> Option<usize> {
+    [4, 2, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4]
+        .get(usize::try_from(format).ok()?)
+        .copied()
 }
 
 /// Each stream's (offset, length) in the vertex data, as Unity lays them out: a stream's stride is the sum of its
 /// channels' sizes and each stream starts 16-byte aligned.
-fn streams(unity: UnityVersion, vd: &Value, vertices: usize) -> Option<Vec<(usize, usize)>> {
+fn streams(vd: &Value, vertices: usize) -> Option<Vec<(usize, usize)>> {
     let Some(Value::Array(Array::Values(chans))) = vd.get("m_Channels") else {
         return None;
     };
@@ -47,7 +42,7 @@ fn streams(unity: UnityVersion, vd: &Value, vertices: usize) -> Option<Vec<(usiz
             continue;
         }
         let stream = usize::try_from(c.get("stream")?.as_i64()?).ok()?;
-        let size = component_size(unity, c.get("format")?.as_i64()?)?;
+        let size = component_size(c.get("format")?.as_i64()?)?;
         *strides.get_mut(stream)? += dim * size;
     }
     let used = strides.iter().rposition(|&s| s > 0).map_or(0, |s| s + 1);
@@ -87,7 +82,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         };
-        let unity = player.file(&r.file)?.unity;
         let name = format!(
             "{}/{}@{}",
             r.file,
@@ -129,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|n| usize::try_from(n).ok())
             .unwrap_or(0);
         // the layout is right when its streams end where the data does (the last one padded to 16 bytes at most)
-        let layout = streams(unity, vd, vertices).filter(|s| {
+        let layout = streams(vd, vertices).filter(|s| {
             s.last()
                 .is_some_and(|&(o, l)| o + l <= bytes.len() && bytes.len() - (o + l) < 16)
         });
