@@ -22,6 +22,7 @@ serde_json.workspace = true
 [dev-dependencies]
 primase-testdata.workspace = true
 sha2.workspace = true
+xxhash-rust.workspace = true
 
 [lints]
 workspace = true
@@ -45,6 +46,7 @@ serde = { version = "1", default-features = false, features = ["std", "derive"] 
 serde_json = { version = "=1.0.154", default-features = false, features = ["std", "preserve_order", "float_roundtrip"] }
 sha2 = { version = "=0.11.1", default-features = false }
 thiserror = { version = "=2.0.21", default-features = false, features = ["std"] }
+xxhash-rust = { version = "=0.8.19", default-features = false, features = ["xxh3"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

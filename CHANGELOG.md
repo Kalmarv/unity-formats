@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The `mesh_keys` example lists the XXH3-128 keys of every Mesh's vertex streams, whole vertex data and index buffer in a player, as `key<TAB>bytes<TAB>name` lines that `locum-cli index --keys` reads, so the buffers of a frame captured from the game are named by the meshes they came from. A stream's stride is the sum of its channels' sizes by the vertex format enum of the player's Unity version (before 2017, 2017 and 2018, 2019 on) and each stream starts 16-byte aligned; every one of SkateBIRD's 7,491 and Hollow Knight's 3,941 meshes lays out to its stored bytes so. A SkateBIRD title-screen capture (D3D11) has 183 of its 209 buffers named this way, and Hollow Knight's D3D12 captures name the built-in `Plane`'s vertex and index buffers.
+
 ## 0.3.1 (2026-10-30)
 
 - `pipeline::read_urp_global_settings` and `Player::urp_global_settings` read Universal RP's global settings (`UnityUrpGlobalSettings`: the object GraphicsSettings' `m_CurrentRenderPipelineGlobalSettings` names, `m_AssetVersion` 10) to the last byte, with every `[SerializeReference]` graphics settings entry of its managed-reference registry in the settings list's order (`UnityGraphicsSettings`, each field in declaration order). 18 classes of Universal RP 17.3, Core RP 17.3 and GPU Driven RP 17.3 have a verified layout (`pipeline::verified_graphics_settings`); another class, another class version, an entry the list and the registry do not both hold or non-empty probe volume scene data is refused by name. `UnityUrpGlobalSettings::renderer_resources` gives the Universal Renderer's runtime shaders (`UnityUrpRendererResources`: CopyDepth and DBufferClear among them), `render_compatibility_mode` the stored Compatibility Mode. PEAK's and Sledding Game's settings read to their last byte with the values of an independent reading of the same bytes; Big Walk's hold a class of the game's own and are refused (`tests/urp.rs`).
