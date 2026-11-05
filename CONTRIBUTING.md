@@ -9,7 +9,7 @@ cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 
-The toolchain is pinned in `rust-toolchain.toml`. The unit tests and the tests on synthetic bytes need no game files. The test that reads real games (`tests/serialized_census.rs`) skips with a line naming its input unless the `GAME_DATA` environment variable names a configuration file; the README says how to set that up, and [tests/inputs/README.md](tests/inputs/README.md) lists the inputs.
+The toolchain is pinned in `rust-toolchain.toml`. The unit tests and the tests on synthetic bytes need no game files. The test that reads real games (`tests/serialized_census.rs`) skips with a line naming its input unless the `GAME_DATA` environment variable names a configuration file; [docs/testing.md](docs/testing.md) says how to set that up, and [tests/inputs/README.md](tests/inputs/README.md) lists the inputs.
 
 The code blocks in README.md are compiled as doc tests, and `examples/inspect_player.rs` is a runnable version of the README example. When you add a real-data input, declare it in `tests/inputs/mod.rs` and update the generated tables in `tests/inputs/README.md` (the `real_data_inputs` test prints the expected tables when they differ).
 
@@ -29,7 +29,7 @@ Do not attach game files, extracted assets, type tree packages made from a game,
 - Keep public items documented, and keep refusals naming what was found and where.
 - Library code (outside tests) denies `clippy::indexing_slicing`, `clippy::arithmetic_side_effects` and `clippy::cast_possible_truncation` (`src/lib.rs`): read with `get`, `checked_*`/`saturating_*` and `try_from`, and report a failure as an `Error` naming the offset.
 - Reads of untrusted lengths and indices are checked against the bytes that exist before anything is allocated for them; add a test with synthetic bytes next to behaviour you change.
-- A module's docs say what it refuses; lifting a refusal changes those docs and the README's "What it does not do" list too.
+- A module's docs say what it refuses; lifting a refusal changes those docs and [docs/limitations.md](docs/limitations.md) too.
 
 ## File access
 
