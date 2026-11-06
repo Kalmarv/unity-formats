@@ -1,15 +1,19 @@
 //! The SerializedFile container: what `globalgamemanagers`, `*.assets` and `levelN` are.
 //!
-//! Layout (container versions 21 and 22): a big-endian header followed by metadata in the file's
+//! Layout (container versions 17 to 22): a big-endian header followed by metadata in the file's
 //! endianness: Unity version, target platform, whether type trees are embedded, the types (class id, stripped,
 //! script index, hashes), the object table (path id, data offset, size, type index), script references, external
-//! files, reference types and a user string. Objects' bytes follow at the data offset.
-//! Version 21 stores metadata size, file size and data offset as 32-bit header fields, followed by an
+//! files, reference types (from version 20) and a user string. Objects' bytes follow at the data offset.
+//! Versions up to 21 store metadata size, file size and data offset as 32-bit header fields, followed by an
 //! endianness byte and three reserved bytes; metadata starts at byte 20. Version 22 repeats those sizes
 //! after the legacy fields as 32/64/64-bit numbers plus eight reserved bytes; metadata starts at byte 48.
-//! Object offsets are unsigned 32-bit in version 21 and signed 64-bit in version 22.
+//! Object offsets are unsigned 32-bit up to version 21 and signed 64-bit in version 22. An embedded tree's node
+//! gains a reference type hash in version 19 (24 bytes before, 32 from then); a type stores its dependencies (a
+//! reference type its managed class) from version 21.
 //!
-//! Only versions verified against real data are read; others are refused. A file's types may carry their type trees
+//! Versions 17, 21 and 22 are checked against real files (UnityPy's samples and Enter the Gungeon for 17); 18 to 20
+//! differ from them only in the three fields above, each read at the version UnityPy and AssetStudio read it from.
+//! Other versions are refused. A file's types may carry their type trees
 //! (an AssetBundle's files do; a player build strips them and objects are decoded with a [`TypeTreePackage`] instead):
 //! they are read into [`SerializedType::tree`], their common-string offsets resolved from the package for the file's
 //! Unity version.
@@ -21,13 +25,20 @@ use std::sync::Arc;
 use crate::bundle::Bundle;
 use crate::reader::Reader;
 use crate::tpk::{CommonStrings, TypeTreePackage};
-use crate::typetree::{Node, TypeTree};
+use crate::typetree::{Node, ReferenceTrees, TypeTree};
 use crate::value::Value;
 use crate::version::UnityVersion;
 use crate::{Error, Result, invalid};
 
-/// Container versions read (verified on real files).
-pub const VERSIONS: std::ops::RangeInclusive<u32> = 21..=22;
+/// Container versions read (see the module's documentation for which are checked against real files).
+pub const VERSIONS: std::ops::RangeInclusive<u32> = 17..=22;
+
+/// The first container version whose type tree nodes carry a reference type hash.
+const NODE_REFERENCE_HASH: u32 = 19;
+/// The first container version with a table of reference types.
+const REFERENCE_TYPES: u32 = 20;
+/// The first container version whose types store their dependencies (a reference type its managed class).
+const TYPE_DEPENDENCIES: u32 = 21;
 
 /// The MonoBehaviour class: its type tree covers the base fields; the script's own fields follow.
 pub const MONO_BEHAVIOUR: i32 = 114;
@@ -49,9 +60,11 @@ pub struct SerializedType {
     /// The type tree the file stores for the type, when it stores trees (an AssetBundle's files do). A MonoBehaviour
     /// type's tree holds its script's fields too.
     pub tree: Option<Arc<TypeTree>>,
-    /// The types a type's tree refers to (the file's type indices), for a type of a file that stores trees.
+    /// The types a type's tree refers to (the file's type indices), for a type of a file that stores trees (from
+    /// container version 21; empty before).
     pub dependencies: Vec<i32>,
-    /// The managed class a reference type stands for, for a reference type of a file that stores trees.
+    /// The managed class a reference type stands for, for a reference type of a file that stores trees (from container
+    /// version 21).
     pub reference: Option<ReferenceClass>,
 }
 
@@ -114,7 +127,7 @@ impl Decoded {
 /// the file's bytes kept so objects can be read from it.
 #[derive(Clone, Debug)]
 pub struct SerializedFile {
-    /// The container version (21 or 22: see [`VERSIONS`]).
+    /// The container version (one of [`VERSIONS`]).
     pub version: u32,
     /// The Unity version string the file was built with (`2019.4.20f1`).
     pub unity_version: String,
@@ -132,7 +145,7 @@ pub struct SerializedFile {
     pub script_types: Vec<(i32, i64)>,
     /// The files this file's pointers can name (file id = index + 1).
     pub externals: Vec<External>,
-    /// The table of types of managed references (`[SerializeReference]`).
+    /// The table of types of managed references (`[SerializeReference]`; from container version 20, empty before).
     pub ref_types: Vec<SerializedType>,
     /// The user string at the end of the metadata.
     pub user_information: String,
@@ -165,6 +178,8 @@ fn count(r: &mut Reader, what: &str) -> Result<usize> {
 struct TreeContext<'a> {
     common: Option<CommonStrings<'a>>,
     version: UnityVersion,
+    /// The file's container version.
+    container: u32,
     strings: BTreeMap<String, Arc<str>>,
 }
 
@@ -214,24 +229,32 @@ impl TreeContext<'_> {
 /// An offset with this bit set names a string of the engine's common string table instead of the tree's buffer.
 const COMMON_STRING: u32 = 0x8000_0000;
 
-/// The bytes of one embedded type tree node in the metadata (version 19 and later): version `i16`, level `u8`, type
+/// The bytes of one embedded type tree node in the metadata of container `version`: version `i16`, level `u8`, type
 /// flags `u8`, type string offset `u32`, name string offset `u32`, byte size `i32`, index `i32`, meta flags `u32`,
-/// reference type hash `u64`.
-const TREE_NODE_BYTES: usize = 32;
+/// and from version 19 a reference type hash `u64`.
+fn tree_node_bytes(version: u32) -> usize {
+    if version >= NODE_REFERENCE_HASH { 32 } else { 24 }
+}
 
-/// One type's embedded tree: a node count, the string buffer's size, the nodes (each [`TREE_NODE_BYTES`], with the
+/// One type's embedded tree: a node count, the string buffer's size, the nodes (each [`tree_node_bytes`], with the
 /// nesting level), the buffer. The nodes are in depth-first order; a node with a level is the child of the nearest
 /// node before it with a lower one.
 fn read_tree(r: &mut Reader, context: &mut TreeContext) -> Result<Arc<TypeTree>> {
     let nodes = r.i32()?;
     let buffer_size = r.i32()?;
+    let node_bytes = tree_node_bytes(context.container);
     let nodes = usize::try_from(nodes)
         .ok()
-        .filter(|&n| n > 0 && n <= r.remaining() / TREE_NODE_BYTES)
+        .filter(|&n| {
+            n > 0
+                && r.remaining()
+                    .checked_div(node_bytes)
+                    .is_some_and(|most| n <= most)
+        })
         .ok_or_else(|| invalid(format!("a type tree of {nodes} nodes in {} bytes", r.remaining())))?;
     let buffer_size = usize::try_from(buffer_size)
         .map_err(|_| invalid(format!("a type tree string buffer of {buffer_size} bytes")))?;
-    let raw = r.take(nodes.saturating_mul(TREE_NODE_BYTES))?;
+    let raw = r.take(nodes.saturating_mul(node_bytes))?;
     let buffer = r.take(buffer_size)?;
     let mut nodes: Vec<Node> = Vec::with_capacity(nodes);
     // the open ancestors: node indices by level
@@ -245,7 +268,9 @@ fn read_tree(r: &mut Reader, context: &mut TreeContext) -> Result<Arc<TypeTree>>
         let byte_size = n.i32()?;
         let _index = n.i32()?;
         let meta_flag = n.u32()?;
-        let _reference_hash = n.u64()?;
+        if context.container >= NODE_REFERENCE_HASH {
+            let _reference_hash = n.u64()?;
+        }
         if level > open.len() || (level == 0 && !nodes.is_empty()) {
             return Err(invalid(format!(
                 "type tree node {} is at level {level}, below {} open levels",
@@ -293,13 +318,14 @@ fn serialized_type(
     let (mut tree, mut dependencies, mut reference_class) = (None, Vec::new(), None);
     if let Some(context) = trees {
         tree = Some(read_tree(r, context)?);
-        if reference {
+        let follows = context.container >= TYPE_DEPENDENCIES;
+        if follows && reference {
             reference_class = Some(ReferenceClass {
                 class: r.cstr()?,
                 namespace: r.cstr()?,
                 assembly: r.cstr()?,
             });
-        } else {
+        } else if follows {
             let n = count(r, "type dependency")?;
             dependencies = (0..n).map(|_| r.i32()).collect::<Result<Vec<_>>>()?;
         }
@@ -316,7 +342,7 @@ fn serialized_type(
     })
 }
 
-/// A SerializedFile's header, version 21 or 22.
+/// A SerializedFile's header, of a version in [`VERSIONS`].
 struct Header {
     version: u32,
     big_endian: bool,
@@ -384,7 +410,7 @@ impl SerializedFile {
         };
         let check = || -> Option<bool> {
             Some(match be(8)? {
-                21 => {
+                v if v < 22 && VERSIONS.contains(&v) => {
                     let end = 20u64.checked_add(u64::from(be(0)?))?;
                     let (size, offset) = (u64::from(be(4)?), u64::from(be(12)?));
                     be(0)? > 0 && size == len && end <= offset && offset <= size
@@ -522,6 +548,7 @@ impl SerializedFile {
         let mut context = TreeContext {
             common: package.and_then(|p| p.common_strings(unity)),
             version: unity,
+            container: version,
             strings: BTreeMap::new(),
         };
         let types = (0..count(&mut r, "type")?)
@@ -531,7 +558,7 @@ impl SerializedFile {
         for _ in 0..count(&mut r, "object")? {
             r.align(4)?;
             let path_id = r.i64()?;
-            let start = if version == 21 {
+            let start = if version < 22 {
                 i64::from(r.u32()?)
             } else {
                 r.i64()?
@@ -571,9 +598,13 @@ impl SerializedFile {
             let path = r.cstr()?;
             externals.push(External { guid, kind, path });
         }
-        let ref_types = (0..count(&mut r, "reference type")?)
-            .map(|_| serialized_type(&mut r, true, has_trees.then_some(&mut context)))
-            .collect::<Result<Vec<_>>>()?;
+        let ref_types = if version >= REFERENCE_TYPES {
+            (0..count(&mut r, "reference type")?)
+                .map(|_| serialized_type(&mut r, true, has_trees.then_some(&mut context)))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
         let user_information = r.cstr()?;
         if r.pos != meta_end {
             return Err(invalid(format!(
@@ -667,7 +698,7 @@ impl SerializedFile {
     pub fn decode_with(&self, o: &ObjectInfo, tree: &TypeTree) -> Result<Decoded> {
         let bytes = self.bytes(o)?;
         let (value, used) = tree
-            .decode(&bytes, self.big_endian)
+            .decode_with_references(&bytes, self.big_endian, self)
             .map_err(|e| invalid(format!("object {} (class {}): {e}", o.path_id, o.class_id)))?;
         let rest = bytes.len().checked_sub(used).ok_or_else(|| {
             invalid(format!(
@@ -694,5 +725,17 @@ impl SerializedFile {
             )));
         }
         Ok(d)
+    }
+}
+
+/// A file's reference types with their trees (a file that stores trees stores them).
+impl ReferenceTrees for SerializedFile {
+    fn reference_tree(&self, class: &str, namespace: &str, assembly: &str) -> Option<&TypeTree> {
+        self.ref_types.iter().find_map(|t| {
+            let r = t.reference.as_ref()?;
+            (r.class == class && r.namespace == namespace && r.assembly == assembly)
+                .then_some(())
+                .and(t.tree.as_deref())
+        })
     }
 }

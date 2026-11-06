@@ -1,5 +1,6 @@
-//! Every UnityFS bundle of PEAK (`installs.peak`), Sledding Game (`installs.sledding`) and Big Walk
-//! (`installs.bigwalk`), read with the type tree package `tools.unity_tpk`.
+//! Every UnityFS bundle of PEAK (`installs.peak`), Sledding Game (`installs.sledding`), Big Walk
+//! (`installs.bigwalk`) and Enter the Gungeon (`installs.gungeon`: format 6, SerializedFile version 17), read with the
+//! type tree package `tools.unity_tpk`.
 //!
 //! `every_bundle_matches_the_independent_reader`: each bundle against an independent reader's census
 //! (`oracles.unitypy`: tests/oracles/unitypy_bundles.py, UnityPy over the script's own bundle reader): every node's
@@ -22,8 +23,25 @@ use inputs::{Game, OracleSet, Tool, install_file, oracle, tool};
 use serde_json::Value as Json;
 use unity_formats::TypeTreePackage;
 
+/// The files of `dir`, and of its folders when `nested`.
+fn files(dir: &std::path::Path, nested: bool) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if nested {
+                found.extend(files(&path, true));
+            }
+        } else {
+            found.push(path);
+        }
+    }
+    found
+}
+
 /// The bundles of an install, in a stable order.
 fn bundles(game: Game) -> Option<Vec<PathBuf>> {
+    let mut nested = false;
     let (dir, wanted): (PathBuf, fn(&str) -> bool) = match game {
         Game::Peak => (install_file(game, "PEAK_Data/StreamingAssets/maps")?, |n| {
             n == "maps" || n.ends_with(".assetbundle")
@@ -33,12 +51,15 @@ fn bundles(game: Game) -> Option<Vec<PathBuf>> {
             |n| n.ends_with(".bundle"),
         ),
         Game::Bigwalk => (install_file(game, "Big Walk_Data")?, |n| n == "data.unity3d"),
-        Game::Skatebird | Game::General => return None,
+        Game::Gungeon => {
+            // every file of the folder and of its `dungeons` is a bundle
+            nested = true;
+            (install_file(game, "EtG_Data/StreamingAssets/Assets")?, |_| true)
+        }
+        Game::Skatebird | Game::Ror2 | Game::Schedule1 | Game::General => return None,
     };
-    let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
+    let mut found: Vec<PathBuf> = files(&dir, nested)
+        .into_iter()
         .filter(|p| p.file_name().is_some_and(|n| wanted(&n.to_string_lossy())))
         .collect();
     found.sort();
@@ -80,6 +101,8 @@ fn read_lines(path: &std::path::Path) -> Vec<Json> {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Counts {
     bundles: u64,
+    /// Bundles by (format version, header flags).
+    headers: BTreeMap<(u64, u64), u64>,
     nodes: u64,
     serialized: u64,
     streams: u64,
@@ -101,8 +124,11 @@ fn counts(lines: &[Json]) -> Counts {
             for other in blocks.as_object().unwrap().keys() {
                 assert!(other == "0" || other == "3", "a block compression {other}");
             }
-            assert_eq!(l["header"]["flags"], 0x243, "{l}");
-            assert_eq!(l["header"]["format_version"], 8, "{l}");
+            let header = (
+                l["header"]["format_version"].as_u64().unwrap(),
+                l["header"]["flags"].as_u64().unwrap(),
+            );
+            *c.headers.entry(header).or_default() += 1;
         } else if l.get("node").is_some() {
             c.nodes += 1;
             c.node_bytes += l["size"].as_u64().unwrap();
@@ -125,6 +151,7 @@ fn expected(game: Game) -> Counts {
     match game {
         Game::Peak => Counts {
             bundles: 8,
+            headers: BTreeMap::from([((8, 0x243), 8)]),
             nodes: 441,
             serialized: 417,
             streams: 24,
@@ -137,6 +164,7 @@ fn expected(game: Game) -> Counts {
         },
         Game::Sledding => Counts {
             bundles: 50,
+            headers: BTreeMap::from([((8, 0x243), 50)]),
             nodes: 66,
             serialized: 50,
             streams: 16,
@@ -149,6 +177,7 @@ fn expected(game: Game) -> Counts {
         },
         Game::Bigwalk => Counts {
             bundles: 1,
+            headers: BTreeMap::from([((8, 0x243), 1)]),
             nodes: 19,
             serialized: 12,
             streams: 7,
@@ -159,7 +188,22 @@ fn expected(game: Game) -> Counts {
             objects: 659_824,
             node_bytes: 5_714_422_612,
         },
-        Game::Skatebird | Game::General => unreachable!("not a game with bundles"),
+        Game::Gungeon => Counts {
+            bundles: 30,
+            headers: BTreeMap::from([((6, 0x43), 30)]),
+            nodes: 49,
+            serialized: 34,
+            streams: 15,
+            blocks_stored: 0,
+            blocks_lz4hc: 8_479,
+            types: 2_197,
+            types_with_trees: 2_197,
+            objects: 93_034,
+            node_bytes: 1_109_514_978,
+        },
+        Game::Skatebird | Game::Ror2 | Game::Schedule1 | Game::General => {
+            unreachable!("not a game this census reads")
+        }
     }
 }
 
@@ -178,7 +222,7 @@ fn key(line: &Json) -> String {
     }
 }
 
-const GAMES: [Game; 3] = [Game::Peak, Game::Sledding, Game::Bigwalk];
+const GAMES: [Game; 4] = [Game::Peak, Game::Sledding, Game::Bigwalk, Game::Gungeon];
 
 #[test]
 fn every_bundle_matches_the_independent_reader() {
@@ -247,32 +291,20 @@ fn decoded(lines: &[Json]) -> Decoded {
     d
 }
 
-/// The one reason an object of these installs is refused: a MonoBehaviour with a `[SerializeReference]` field, whose
-/// registry of managed references the type tree reader does not decode.
-const MANAGED: &str =
-    "class 114: not supported: data: managed reference (needs the file's reference type trees)";
-
-fn expected_decoded(game: Game) -> Decoded {
-    let refused = |n: u64| BTreeMap::from([(MANAGED.to_owned(), n)]);
-    match game {
-        Game::Peak => Decoded {
-            objects: 136_474_698,
-            decoded: 136_275_632,
-            covered: 136_275_632,
-            no_tree: 2,
-            refusals: refused(199_064),
-            streams_resolved: 0,
-            stream_bytes: 0,
-            trees_same_as_package: 8_367,
-            trees_differ_from_package: 0,
-            trees_not_in_package: 0,
-        },
+/// What decoding every object of a game's bundles finds; `None` where it has not been measured since managed
+/// references were first read (0.5.0).
+fn expected_decoded(game: Game) -> Option<Decoded> {
+    Some(match game {
+        // 136,474,698 objects, 199,064 of them (MonoBehaviours with `[SerializeReference]` fields) refused before 0.5.0;
+        // PEAK was not installed to measure the reading of their registries
+        Game::Peak => return None,
         Game::Sledding => Decoded {
+            // every object, the 94 MonoBehaviours with `[SerializeReference]` fields among them
             objects: 1_427,
-            decoded: 1_333,
-            covered: 1_333,
+            decoded: 1_427,
+            covered: 1_427,
             no_tree: 0,
-            refusals: refused(94),
+            refusals: BTreeMap::new(),
             streams_resolved: 317,
             stream_bytes: 206_661_032,
             trees_same_as_package: 173,
@@ -284,8 +316,23 @@ fn expected_decoded(game: Game) -> Decoded {
             no_tree: 659_824,
             ..Decoded::default()
         },
-        Game::Skatebird | Game::General => unreachable!("not a game with bundles"),
-    }
+        // every object, the one binary TextAsset's `m_Script` among them (a string that is not UTF-8)
+        Game::Gungeon => Decoded {
+            objects: 93_034,
+            decoded: 93_034,
+            covered: 93_034,
+            no_tree: 0,
+            refusals: BTreeMap::new(),
+            streams_resolved: 810,
+            stream_bytes: 756_459_403,
+            trees_same_as_package: 385,
+            trees_differ_from_package: 0,
+            trees_not_in_package: 0,
+        },
+        Game::Skatebird | Game::Ror2 | Game::Schedule1 | Game::General => {
+            unreachable!("not a game this census reads")
+        }
+    })
 }
 
 #[test]
@@ -297,7 +344,10 @@ fn every_object_decodes_by_its_stored_tree() {
         let lines = censuses(&paths, &package, true);
         let found = decoded(&lines);
         eprintln!("{game:?}: {found:?}");
-        assert_eq!(found, expected_decoded(game), "{game:?}");
+        let expected = expected_decoded(game).unwrap_or_else(|| {
+            panic!("{game:?}: its decode counts are not measured since managed references are read: write these in")
+        });
+        assert_eq!(found, expected, "{game:?}");
     }
 }
 

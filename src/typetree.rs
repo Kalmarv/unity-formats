@@ -87,9 +87,37 @@ enum Kind {
         element: usize,
         aligned: bool,
     },
-    /// Managed references (`[SerializeReference]`), which need the file's own reference type trees.
+    /// A managed reference (`[SerializeReference]`, a `ReferencedObject`): its id and class, then its data, laid out by
+    /// the type tree the file stores for that class ([`ReferenceTrees`]).
     Referenced,
+    /// The managed-reference registry (`ManagedReferencesRegistry`): stored once, by the object; one inside a
+    /// referenced object's data is not stored.
+    Registry,
     Struct,
+}
+
+/// Where a managed reference's data is laid out: the type tree a file stores for the reference type of a class (its name,
+/// namespace and assembly). [`crate::SerializedFile`] gives its reference types'.
+pub trait ReferenceTrees {
+    /// The tree of the class, `None` when the file stores none for it.
+    fn reference_tree(&self, class: &str, namespace: &str, assembly: &str) -> Option<&TypeTree>;
+}
+
+/// No reference trees: a managed reference with a class is refused.
+struct NoReferences;
+
+impl ReferenceTrees for NoReferences {
+    fn reference_tree(&self, _: &str, _: &str, _: &str) -> Option<&TypeTree> {
+        None
+    }
+}
+
+/// What a read needs besides the bytes: the reference trees, and whether it is inside the registry (where a nested one
+/// is not stored).
+#[derive(Clone, Copy)]
+struct Context<'a> {
+    references: &'a dyn ReferenceTrees,
+    in_registry: bool,
 }
 
 /// A class's type tree; node 0 is the root.
@@ -136,6 +164,8 @@ impl TypeTree {
                 Kind::Pair
             } else if &*n.ty == "ReferencedObject" {
                 Kind::Referenced
+            } else if &*n.ty == "ManagedReferencesRegistry" {
+                Kind::Registry
             } else if let Some(a) = first.filter(|f| &*f.ty == "Array") {
                 let &[_, element] = a.children.as_slice() else {
                     return Err(invalid(format!(
@@ -159,7 +189,7 @@ impl TypeTree {
             let size = match kind {
                 Kind::Prim(p) => p.size(),
                 Kind::String | Kind::Typeless | Kind::Vector { .. } => 4,
-                Kind::Pair | Kind::Struct => node
+                Kind::Pair | Kind::Struct | Kind::Registry => node
                     .children
                     .iter()
                     .map(|&c| min_sizes.get(c).copied().unwrap_or(0))
@@ -190,10 +220,26 @@ impl TypeTree {
             .ok_or_else(|| invalid(format!("type tree node {i} of {}", self.nodes.len())))
     }
 
-    /// Decode `data` (an object's bytes) from its start; returns the value and the bytes consumed.
+    /// Decode `data` (an object's bytes) from its start; returns the value and the bytes consumed. A managed reference
+    /// with a class is refused: [`TypeTree::decode_with_references`] reads it.
     pub fn decode(&self, data: &[u8], big_endian: bool) -> Result<(Value, usize)> {
+        self.decode_with_references(data, big_endian, &NoReferences)
+    }
+
+    /// As [`TypeTree::decode`], reading each managed reference's data by the tree `references` gives its class (a null
+    /// reference, of no class, has none). A class it has no tree for is refused.
+    pub fn decode_with_references(
+        &self,
+        data: &[u8],
+        big_endian: bool,
+        references: &dyn ReferenceTrees,
+    ) -> Result<(Value, usize)> {
         let mut r = Reader::new(data, big_endian);
-        let v = self.read(0, &mut r, 0)?;
+        let context = Context {
+            references,
+            in_registry: false,
+        };
+        let v = self.read(0, &mut r, 0, context)?;
         Ok((v, r.pos))
     }
 
@@ -201,13 +247,28 @@ impl TypeTree {
     /// are not read, so a name stored first costs a few bytes whatever the object holds. `None` when the root has no
     /// such field; the value is what [`TypeTree::decode`] gives it. A root that is not a struct has no fields.
     pub fn decode_field(&self, data: &[u8], big_endian: bool, name: &str) -> Result<Option<Value>> {
+        self.decode_field_with_references(data, big_endian, name, &NoReferences)
+    }
+
+    /// As [`TypeTree::decode_field`], reading managed references as [`TypeTree::decode_with_references`] does.
+    pub fn decode_field_with_references(
+        &self,
+        data: &[u8],
+        big_endian: bool,
+        name: &str,
+        references: &dyn ReferenceTrees,
+    ) -> Result<Option<Value>> {
         let (root, kind) = self.node(0)?;
         if !matches!(kind, Kind::Struct) {
             return Ok(None);
         }
         let mut r = Reader::new(data, big_endian);
+        let context = Context {
+            references,
+            in_registry: false,
+        };
         for &c in &root.children {
-            let v = self.read(c, &mut r, 1)?;
+            let v = self.read(c, &mut r, 1, context)?;
             if &*self.node(c)?.0.name == name {
                 return Ok(Some(v));
             }
@@ -215,7 +276,7 @@ impl TypeTree {
         Ok(None)
     }
 
-    fn read(&self, i: usize, r: &mut Reader, depth: u32) -> Result<Value> {
+    fn read(&self, i: usize, r: &mut Reader, depth: u32, context: Context) -> Result<Value> {
         if depth > 128 {
             return Err(invalid("type tree recursion deeper than 128"));
         }
@@ -224,12 +285,9 @@ impl TypeTree {
             Kind::Prim(p) => prim(*p, r)?,
             Kind::String => {
                 let len = length(r, 1)?;
-                let b = r.take(len)?;
-                let s = std::str::from_utf8(b)
-                    .map_err(|_| invalid(format!("{}: string is not UTF-8", n.name)))?
-                    .to_owned();
+                let b = r.take(len)?.to_vec();
                 r.align(4)?;
-                Value::String(s)
+                String::from_utf8(b).map_or_else(|e| Value::Bytes(e.into_bytes()), Value::String)
             }
             Kind::Typeless => {
                 let len = length(r, 1)?;
@@ -242,29 +300,29 @@ impl TypeTree {
                         n.children.len()
                     )));
                 };
-                let a = self.read(first, r, depth.saturating_add(1))?;
-                let b = self.read(second, r, depth.saturating_add(1))?;
+                let a = self.read(first, r, depth.saturating_add(1), context)?;
+                let b = self.read(second, r, depth.saturating_add(1), context)?;
                 Value::Pair(Box::new((a, b)))
             }
             Kind::Vector { element, aligned } => {
-                let v = self.vector(*element, r, depth)?;
+                let v = self.vector(*element, r, depth, context)?;
                 if *aligned {
                     r.align(4)?;
                 }
                 v
             }
-            Kind::Referenced => {
-                return Err(Error::Unsupported(format!(
-                    "{}: managed reference (needs the file's reference type trees)",
-                    n.name
-                )));
-            }
-            Kind::Struct => {
+            Kind::Referenced => self.referenced(n, r, depth, context)?,
+            Kind::Registry if context.in_registry => return Ok(Value::Struct(Vec::new())),
+            Kind::Struct | Kind::Registry => {
+                let context = Context {
+                    in_registry: context.in_registry || matches!(kind, Kind::Registry),
+                    ..context
+                };
                 let mut fields = Vec::with_capacity(n.children.len());
                 for &c in &n.children {
                     fields.push((
                         self.node(c)?.0.name.clone(),
-                        self.read(c, r, depth.saturating_add(1))?,
+                        self.read(c, r, depth.saturating_add(1), context)?,
                     ));
                 }
                 Value::Struct(fields)
@@ -276,7 +334,55 @@ impl TypeTree {
         Ok(v)
     }
 
-    fn vector(&self, e: usize, r: &mut Reader, depth: u32) -> Result<Value> {
+    /// A `ReferencedObject`: its fields in order, its `ReferencedObjectData` read by the tree of the class its `type`
+    /// names (left out for a null reference, whose class is empty), that tree's own registry not stored.
+    fn referenced(&self, n: &Node, r: &mut Reader, depth: u32, context: Context) -> Result<Value> {
+        let mut fields: Vec<(Arc<str>, Value)> = Vec::with_capacity(n.children.len());
+        for &c in &n.children {
+            let child = self.node(c)?.0;
+            if &*child.ty != "ReferencedObjectData" {
+                fields.push((
+                    child.name.clone(),
+                    self.read(c, r, depth.saturating_add(1), context)?,
+                ));
+                continue;
+            }
+            let ty = fields
+                .iter()
+                .find(|(k, _)| &**k == "type")
+                .map(|(_, v)| v)
+                .ok_or_else(|| invalid(format!("{}: a managed reference's data before its type", n.name)))?;
+            let part = |k: &str| {
+                ty.get(k)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| invalid(format!("{}: a managed reference's type without its {k}", n.name)))
+            };
+            let (class, namespace, assembly) = (part("class")?, part("ns")?, part("asm")?);
+            if class.is_empty() {
+                continue;
+            }
+            let tree = context.references.reference_tree(class, namespace, assembly).ok_or_else(|| {
+                Error::Unsupported(format!(
+                    "{}: a managed reference of class {namespace}.{class} ({assembly}), whose type tree the file does \
+                     not store",
+                    n.name
+                ))
+            })?;
+            let data = tree.read(
+                0,
+                r,
+                depth.saturating_add(1),
+                Context {
+                    in_registry: true,
+                    ..context
+                },
+            )?;
+            fields.push((child.name.clone(), data));
+        }
+        Ok(Value::Struct(fields))
+    }
+
+    fn vector(&self, e: usize, r: &mut Reader, depth: u32, context: Context) -> Result<Value> {
         let (en, kind) = self.node(e)?;
         // a primitive element without its own alignment: the elements packed
         if let Kind::Prim(p) = *kind
@@ -295,7 +401,7 @@ impl TypeTree {
         }
         let mut out = Vec::with_capacity(n.min(1 << 16));
         for _ in 0..n {
-            out.push(self.read(e, r, depth.saturating_add(1))?);
+            out.push(self.read(e, r, depth.saturating_add(1), context)?);
         }
         Ok(Value::Array(Array::Values(out)))
     }
@@ -473,5 +579,133 @@ mod tests {
         let mut b = d.clone();
         b[0] = 2;
         assert!(t.decode(&b, false).is_err());
+    }
+
+    /// A string is Unity's byte string: one whose bytes are not UTF-8 (a TextAsset's binary `m_Script`) decodes to
+    /// its bytes, aligned as a string is, and the fields after it read.
+    #[test]
+    fn a_string_that_is_not_utf8_is_its_bytes() {
+        let t = TypeTree::new(vec![
+            node("TextAsset", "Base", 0, vec![1, 5]),
+            node("string", "m_Script", 0, vec![2]),
+            node("Array", "Array", ALIGN, vec![3, 4]),
+            node("int", "size", 0, vec![]),
+            node("char", "data", 0, vec![]),
+            node("int", "m_After", 0, vec![]),
+        ])
+        .unwrap();
+        let mut d = 5i32.to_le_bytes().to_vec();
+        d.extend_from_slice(&[0x89, b'P', 0xff, 0x00, 0xc3, 0, 0, 0]);
+        d.extend_from_slice(&42i32.to_le_bytes());
+        let (v, used) = t.decode(&d, false).unwrap();
+        assert_eq!(used, d.len());
+        let script = v.get("m_Script").unwrap();
+        assert_eq!(script, &Value::Bytes(vec![0x89, b'P', 0xff, 0x00, 0xc3]));
+        assert_eq!(script.as_str(), None);
+        assert_eq!(script.as_bytes(), Some(&[0x89, b'P', 0xff, 0x00, 0xc3][..]));
+        assert_eq!(v.get("m_After"), Some(&Value::Int(42)));
+    }
+
+    /// Nodes of a `string` named `name` at index `at`: the string, its `Array` (aligned) and the size and char nodes.
+    fn string_nodes(name: &str, at: usize) -> Vec<Node> {
+        vec![
+            node("string", name, 0, vec![at + 1]),
+            node("Array", "Array", ALIGN, vec![at + 2, at + 3]),
+            node("int", "size", 0, vec![]),
+            node("char", "data", 0, vec![]),
+        ]
+    }
+
+    fn string_bytes(d: &mut Vec<u8>, s: &str) {
+        d.extend_from_slice(&(s.len() as i32).to_le_bytes());
+        d.extend_from_slice(s.as_bytes());
+        while !d.len().is_multiple_of(4) {
+            d.push(0);
+        }
+    }
+
+    /// The trees of one class, `Thing`: an int and a registry of its own (which a referenced object does not store).
+    struct Things(TypeTree);
+
+    impl ReferenceTrees for Things {
+        fn reference_tree(&self, class: &str, namespace: &str, assembly: &str) -> Option<&TypeTree> {
+            ((class, namespace, assembly) == ("Thing", "Game", "Assembly-CSharp")).then_some(&self.0)
+        }
+    }
+
+    /// A registry of version 2 with two references: one of class `Thing`, its data read by the class's tree (that
+    /// tree's own registry not stored), and a null one (no class), which has no data; then the field after the
+    /// registry. Without the trees, or with a class they do not have, the reference is refused.
+    #[test]
+    fn managed_references_read_by_their_class_trees() {
+        // MonoBehaviour { ManagedReferencesRegistry references { int version; vector RefIds { Array { int size;
+        // ReferencedObject data { SInt64 rid; ReferencedManagedType type { class, ns, asm }; ReferencedObjectData data
+        // } } } }; int m_After }
+        let mut nodes = vec![
+            node("MonoBehaviour", "Base", 0, vec![1, 22]),
+            node("ManagedReferencesRegistry", "references", 0, vec![2, 3]),
+            node("int", "version", 0, vec![]),
+            node("vector", "RefIds", 0, vec![4]),
+            node("Array", "Array", 0, vec![5, 6]),
+            node("int", "size", 0, vec![]),
+            node("ReferencedObject", "data", 0, vec![7, 8, 21]),
+            node("SInt64", "rid", 0, vec![]),
+            node("ReferencedManagedType", "type", 0, vec![9, 13, 17]),
+        ];
+        nodes.extend(string_nodes("class", 9));
+        nodes.extend(string_nodes("ns", 13));
+        nodes.extend(string_nodes("asm", 17));
+        nodes.push(node("ReferencedObjectData", "data", 0, vec![]));
+        nodes.push(node("int", "m_After", 0, vec![]));
+        let mono = TypeTree::new(nodes).unwrap();
+        let thing = TypeTree::new(vec![
+            node("Thing", "Base", 0, vec![1, 2]),
+            node("int", "m_X", 0, vec![]),
+            node("ManagedReferencesRegistry", "references", 0, vec![3]),
+            node("int", "version", 0, vec![]),
+        ])
+        .unwrap();
+        let mut d = 2i32.to_le_bytes().to_vec();
+        d.extend_from_slice(&2i32.to_le_bytes());
+        d.extend_from_slice(&7i64.to_le_bytes());
+        for s in ["Thing", "Game", "Assembly-CSharp"] {
+            string_bytes(&mut d, s);
+        }
+        d.extend_from_slice(&42i32.to_le_bytes());
+        d.extend_from_slice(&(-2i64).to_le_bytes());
+        for s in ["", "", ""] {
+            string_bytes(&mut d, s);
+        }
+        d.extend_from_slice(&9i32.to_le_bytes());
+        let things = Things(thing);
+        let (v, used) = mono.decode_with_references(&d, false, &things).unwrap();
+        assert_eq!(used, d.len());
+        assert_eq!(v.get("m_After"), Some(&Value::Int(9)));
+        let Some(Value::Array(Array::Values(ids))) = v.at(&["references", "RefIds"]) else {
+            panic!("no RefIds: {v:?}");
+        };
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0].get("rid"), Some(&Value::Int(7)));
+        assert_eq!(ids[0].at(&["data", "m_X"]), Some(&Value::Int(42)));
+        assert_eq!(
+            ids[0].at(&["data", "references"]),
+            Some(&Value::Struct(Vec::new()))
+        );
+        assert_eq!(ids[1].get("rid"), Some(&Value::Int(-2)));
+        assert_eq!(ids[1].get("data"), None);
+        // without the trees, or with another class's, the reference is refused by its class
+        for refusal in [mono.decode(&d, false).unwrap_err(), {
+            let mut other = d.clone();
+            other[20] = b'W';
+            mono.decode_with_references(&other, false, &things).unwrap_err()
+        }] {
+            assert!(matches!(refusal, Error::Unsupported(_)), "{refusal}");
+            assert!(
+                refusal
+                    .to_string()
+                    .contains("whose type tree the file does not store"),
+                "{refusal}"
+            );
+        }
     }
 }

@@ -1,4 +1,5 @@
-//! Exact object-table comparison against an independent UnityPy census.
+//! Exact object-table comparison against an independent UnityPy census, for SkateBIRD (`installs.skatebird`) and Enter the
+//! Gungeon (`installs.gungeon`).
 
 #![allow(clippy::unwrap_used)]
 
@@ -42,15 +43,26 @@ fn entry(objects: [i64; 4]) -> (i64, Entry) {
     (path_id, [class_id, offset, size])
 }
 
+/// The players censused, SkateBIRD's (SerializedFile version 21) and Enter the Gungeon's (version 17), with their data
+/// folders.
+fn players() -> [(Game, Option<std::path::PathBuf>); 2] {
+    [
+        (Game::Skatebird, install_file(Game::Skatebird, "SkateBIRD_Data")),
+        (Game::Gungeon, install_file(Game::Gungeon, "EtG_Data")),
+    ]
+}
+
 #[test]
 fn matches_unitypy_census() {
-    let (Some(data), Some(census)) = (
-        install_file(Game::Skatebird, "SkateBIRD_Data"),
-        oracle(OracleSet::UnityPy, Game::Skatebird, "census.json"),
-    ) else {
-        return;
-    };
-    let census: Census = serde_json::from_slice(&std::fs::read(&census).unwrap()).unwrap();
+    for (game, data) in players() {
+        if let (Some(data), Some(census)) = (data, oracle(OracleSet::UnityPy, game, "census.json")) {
+            matches_census(&data, &census);
+        }
+    }
+}
+
+fn matches_census(data: &std::path::Path, census: &std::path::Path) {
+    let census: Census = serde_json::from_slice(&std::fs::read(census).unwrap()).unwrap();
     assert!(!census.files.is_empty(), "census lists no files");
 
     let (mut objects, mut file_bytes, mut object_bytes) = (0usize, 0u64, 0u64);

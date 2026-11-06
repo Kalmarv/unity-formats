@@ -72,8 +72,11 @@ pub enum Value {
     Float(f32),
     /// A `double`.
     Double(f64),
-    /// A `string`.
+    /// A `string` of UTF-8 bytes.
     String(String),
+    /// A `string` whose bytes are not UTF-8: Unity's strings are byte strings, and a TextAsset's `m_Script` holds any
+    /// bytes (a binary file the project imported as text).
+    Bytes(Vec<u8>),
     /// A vector (`Array` node) or `TypelessData`.
     Array(Array),
     /// A `pair`.
@@ -137,10 +140,11 @@ impl Value {
         }
     }
 
-    /// The bytes of a `UInt8`, `char` or `TypelessData` array.
+    /// The bytes of a `UInt8`, `char` or `TypelessData` array, or of a `string` (UTF-8 or not).
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
-            Value::Array(Array::U8(b)) => Some(b),
+            Value::Array(Array::U8(b)) | Value::Bytes(b) => Some(b),
+            Value::String(s) => Some(s.as_bytes()),
             _ => None,
         }
     }
@@ -159,6 +163,7 @@ impl Value {
             Value::Float(f) => float(f64::from(*f)),
             Value::Double(d) => float(*d),
             Value::String(s) => Json::String(s.clone()),
+            Value::Bytes(b) => bytes(b),
             Value::Pair(p) => Json::Array(vec![p.0.to_json(bytes), p.1.to_json(bytes)]),
             Value::Struct(fields) => {
                 let mut m = Map::new();

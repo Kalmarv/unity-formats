@@ -1,4 +1,4 @@
-"""Census of SkateBIRD's SerializedFiles with UnityPy.
+"""Census of a Unity player's SerializedFiles with UnityPy (SkateBIRD's, Enter the Gungeon's).
 
 Writes, for every SerializedFile in the player's data folder, the container version, the
 Unity version string, the object count and the full object table (path id, class id, data
@@ -7,7 +7,7 @@ SerializedFile: tests/serialized_census.rs parses the same files and compares.
 
 Usage:
     pip install UnityPy
-    python tests/oracles/unitypy_census.py <SkateBIRD_Data folder> <oracles root>/unitypy/skatebird/census.json
+    python tests/oracles/unitypy_census.py <Game>_Data <oracles root>/unitypy/<game>/census.json
 
 `<oracles root>` is the `[oracles] root` of the GAME_DATA file (tests/inputs/README.md).
 """

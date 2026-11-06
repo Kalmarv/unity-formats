@@ -12,7 +12,13 @@ use unity_formats::TypeTreePackage;
 use unity_formats::player::{BundleSpec, ColourSpace, NodeSelection, Player};
 
 /// The players read.
-const PLAYERS: [Game; 4] = [Game::Skatebird, Game::Sledding, Game::Peak, Game::Bigwalk];
+const PLAYERS: [Game; 5] = [
+    Game::Skatebird,
+    Game::Sledding,
+    Game::Peak,
+    Game::Bigwalk,
+    Game::Gungeon,
+];
 
 /// A player's data folder, `None` when the game is not configured.
 fn data_folder(game: Game) -> Option<PathBuf> {
@@ -21,7 +27,8 @@ fn data_folder(game: Game) -> Option<PathBuf> {
         Game::Sledding => install_file(game, "Sledding Game_Data"),
         Game::Peak => install_file(game, "PEAK_Data"),
         Game::Bigwalk => install_file(game, "Big Walk_Data"),
-        Game::General => None,
+        Game::Gungeon => install_file(game, "EtG_Data"),
+        Game::Ror2 | Game::Schedule1 | Game::General => None,
     }
 }
 

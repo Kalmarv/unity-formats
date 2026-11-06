@@ -69,6 +69,7 @@
 pub mod animator;
 pub mod bundle;
 pub mod clip;
+pub mod crunch;
 pub mod listing;
 pub mod material;
 pub mod mesh;

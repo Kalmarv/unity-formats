@@ -12,6 +12,9 @@ primase_testdata::inputs! {
         Peak = "peak",
         Sledding = "sledding",
         Bigwalk = "bigwalk",
+        Gungeon = "gungeon",
+        Ror2 = "ror2",
+        Schedule1 = "schedule1",
         General = "general",
     }
     installs {
@@ -32,6 +35,21 @@ primase_testdata::inputs! {
         },
         Bigwalk {
             about: "Big Walk's install folder (a Unity 6000.3.17f1 player in one `data.unity3d`)",
+            source: "the user's own install",
+            gate: true,
+        },
+        Gungeon {
+            about: "Enter the Gungeon's install folder (`EtG_Data`: a Unity 2017.4.27f1 player of SerializedFile version 17, with UnityFS format 6 bundles in `StreamingAssets/Assets`)",
+            source: "the user's own install",
+            gate: true,
+        },
+        Ror2 {
+            about: "Risk of Rain 2's install folder (`Risk of Rain 2_Data`: a Unity 2021.3.45f2 player with Addressables bundles in `StreamingAssets/aa`)",
+            source: "the user's own install",
+            gate: true,
+        },
+        Schedule1 {
+            about: "Schedule I's install folder (`Schedule I_Data`: a Unity 2022.3.62f2 player of loose files)",
             source: "the user's own install",
             gate: true,
         },
@@ -115,6 +133,30 @@ primase_testdata::inputs! {
             about: r#"Big Walk's data folder (`Big Walk_Data`, whose `data.unity3d` is the player's own files in one bundle), read by tests/bundles.rs"#,
             source: r#"the user's own install"#,
         },
+        Query::Install(Game::Gungeon, Some("EtG_Data")) => {
+            status: Live,
+            gate: true,
+            about: r#"Enter the Gungeon's data folder (`EtG_Data`, a Unity 2017.4.27f1 player: five SerializedFile version 17 containers), parsed by tests/serialized_census.rs, opened by tests/player_settings.rs and, with its bundles, by tests/clips.rs"#,
+            source: r#"the user's own install"#,
+        },
+        Query::Oracle(OracleSet::UnityPy, Game::Gungeon, "census.json") => {
+            status: Live,
+            gate: true,
+            about: r#"an independent UnityPy object-table census of that folder (JSON; its schema is the `Census` struct of tests/serialized_census.rs)"#,
+            source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_census.py"#,
+        },
+        Query::Install(Game::Gungeon, Some("EtG_Data/StreamingAssets/Assets")) => {
+            status: Live,
+            gate: true,
+            about: r#"Enter the Gungeon's 30 AssetBundles (`EtG_Data/StreamingAssets/Assets` and its `dungeons` folder: UnityFS format 6, SerializedFile version 17 with stored type trees), read by tests/bundles.rs and tests/clips.rs"#,
+            source: r#"the user's own install"#,
+        },
+        Query::Oracle(OracleSet::UnityPy, Game::Gungeon, "bundles.jsonl") => {
+            status: Live,
+            gate: true,
+            about: r#"an independent census of Enter the Gungeon's bundles (JSON lines; tests/oracles/unitypy_bundles.py makes it, tests/bundles.rs compares)"#,
+            source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy) and the script's own bundle reader"#,
+        },
         Query::Oracle(OracleSet::UnityPy, Game::Peak, "bundles.jsonl") => {
             status: Live,
             gate: true,
@@ -157,6 +199,12 @@ primase_testdata::inputs! {
             about: r#"the colour space Big Walk's PlayerSettings states (`m_ActiveColorSpace`, JSON; tests/oracles/unitypy_player_settings.py makes it, tests/player_settings.rs compares)"#,
             source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_player_settings.py"#,
         },
+        Query::Oracle(OracleSet::UnityPy, Game::Gungeon, "player-settings.json") => {
+            status: Live,
+            gate: true,
+            about: r#"the colour space Enter the Gungeon's PlayerSettings states (`m_ActiveColorSpace`, JSON; tests/oracles/unitypy_player_settings.py makes it, tests/player_settings.rs compares)"#,
+            source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_player_settings.py"#,
+        },
         Query::Oracle(OracleSet::UnityPy, Game::Peak, "urp.json") => {
             status: Live,
             gate: true,
@@ -174,6 +222,54 @@ primase_testdata::inputs! {
             gate: true,
             about: r#"Big Walk's Universal Render Pipeline objects, read from its `data.unity3d`: its pipeline assets' renderers and settings, the renderers' fields and features, and every camera's URP data in its scene files (JSON; tests/oracles/unitypy_urp.py makes it, tests/urp.rs compares)"#,
             source: r#"independent: UnityPy (https://github.com/K0lb3/UnityPy) for the objects and scripts, decoded by tests/oracles/unitypy_urp.py"#,
+        },
+        Query::Install(Game::Ror2, Some("Risk of Rain 2_Data")) => {
+            status: Live,
+            gate: true,
+            about: r#"Risk of Rain 2's data folder (`Risk of Rain 2_Data`, a Unity 2021.3.45f2 player), whose textures and legacy clips tests/textures.rs and tests/clips.rs read with its bundles"#,
+            source: r#"the user's own install"#,
+        },
+        Query::Install(Game::Ror2, Some("Risk of Rain 2_Data/StreamingAssets/aa")) => {
+            status: Live,
+            gate: true,
+            about: r#"Risk of Rain 2's Addressables bundles (`Risk of Rain 2_Data/StreamingAssets/aa`, where its crunched DXT1 and DXT5 textures are), read by tests/textures.rs and tests/clips.rs"#,
+            source: r#"the user's own install"#,
+        },
+        Query::Oracle(OracleSet::UnityPy, Game::Ror2, "textures.json") => {
+            status: Live,
+            gate: true,
+            about: r#"UnityPy's reading of every Texture2D of Risk of Rain 2's player and bundles: name, format, size, mips, pixel byte length and, crunched, the SHA-256 of its first level as RGBA (JSON; tests/oracles/unitypy_textures.py makes it, tests/textures.rs compares)"#,
+            source: r#"independent: UnityPy 1.25.4 (https://github.com/K0lb3/UnityPy) and its texture2ddecoder crunch decoder, run by tests/oracles/unitypy_textures.py"#,
+        },
+        Query::Install(Game::Schedule1, Some("Schedule I_Data")) => {
+            status: Live,
+            gate: true,
+            about: r#"Schedule I's data folder (`Schedule I_Data`, a Unity 2022.3.62f2 player of loose files, with crunched DXT5 textures and weighted legacy clip keys), whose textures and legacy clips tests/textures.rs and tests/clips.rs read"#,
+            source: r#"the user's own install"#,
+        },
+        Query::Oracle(OracleSet::UnityPy, Game::Schedule1, "textures.json") => {
+            status: Live,
+            gate: true,
+            about: r#"UnityPy's reading of every Texture2D of Schedule I's player: name, format, size, mips, pixel byte length and, crunched, the SHA-256 of its first level as RGBA (JSON; tests/oracles/unitypy_textures.py makes it, tests/textures.rs compares)"#,
+            source: r#"independent: UnityPy 1.25.4 (https://github.com/K0lb3/UnityPy) and its texture2ddecoder crunch decoder, run by tests/oracles/unitypy_textures.py"#,
+        },
+        Query::Oracle(OracleSet::UnityPy, Game::Gungeon, "clips.json") => {
+            status: Live,
+            gate: true,
+            about: r#"UnityPy's reading of every legacy AnimationClip of Enter the Gungeon's player and bundles: name, wrap mode, events, and each curve's kind, path, attribute, class, key count and the SHA-256 of its keys (JSON; tests/oracles/unitypy_clips.py makes it, tests/clips.rs compares)"#,
+            source: r#"independent: UnityPy 1.25.4 (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_clips.py"#,
+        },
+        Query::Oracle(OracleSet::UnityPy, Game::Ror2, "clips.json") => {
+            status: Live,
+            gate: true,
+            about: r#"UnityPy's reading of every legacy AnimationClip of Risk of Rain 2's player and bundles: name, wrap mode, events, and each curve's kind, path, attribute, class, key count and the SHA-256 of its keys (JSON; tests/oracles/unitypy_clips.py makes it, tests/clips.rs compares)"#,
+            source: r#"independent: UnityPy 1.25.4 (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_clips.py"#,
+        },
+        Query::Oracle(OracleSet::UnityPy, Game::Schedule1, "clips.json") => {
+            status: Live,
+            gate: true,
+            about: r#"UnityPy's reading of every legacy AnimationClip of Schedule I's player: name, wrap mode, events, and each curve's kind, path, attribute, class, key count and the SHA-256 of its keys (JSON; tests/oracles/unitypy_clips.py makes it, tests/clips.rs compares)"#,
+            source: r#"independent: UnityPy 1.25.4 (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_clips.py"#,
         },
     }
     debug {}

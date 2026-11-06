@@ -411,7 +411,7 @@ impl Player {
             .object(r.path_id)
             .ok_or_else(|| invalid(format!("{}: no object {}", r.file, r.path_id)))?;
         self.tree(&r.file, f, o)?
-            .decode_field(&f.bytes(o)?, f.big_endian, name)
+            .decode_field_with_references(&f.bytes(o)?, f.big_endian, name, f)
             .map_err(|e| invalid(format!("{}/{} (class {}): {e}", r.file, r.path_id, o.class_id)))
     }
 

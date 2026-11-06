@@ -13,13 +13,14 @@ const TYPES: [char; 6] = ['a', 'b', 'c', 'f', 'p', 'x'];
 
 impl UnityVersion {
     /// Pack a version from its parts (`kind` 0 to 5: a, b, c, f, p, x).
-    pub fn new(major: u16, minor: u16, build: u16, kind: u8, number: u8) -> Self {
+    pub const fn new(major: u16, minor: u16, build: u16, kind: u8, number: u8) -> Self {
+        // widening casts (`From` is not const)
         UnityVersion(
-            u64::from(major) << 48
-                | u64::from(minor) << 32
-                | u64::from(build) << 16
-                | u64::from(kind) << 8
-                | u64::from(number),
+            (major as u64) << 48
+                | (minor as u64) << 32
+                | (build as u64) << 16
+                | (kind as u64) << 8
+                | number as u64,
         )
     }
 

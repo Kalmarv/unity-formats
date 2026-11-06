@@ -52,7 +52,7 @@ def decompress(data, compression, size):
 
 
 class Bundle:
-    """The header, blocks and nodes of a UnityFS bundle (format 7 or 8), blocks read on demand."""
+    """The header, blocks and nodes of a UnityFS bundle (format 6 to 8), blocks read on demand."""
 
     def __init__(self, path):
         self.f = f = open(path, "rb")
@@ -156,7 +156,8 @@ def serialized(data, name):
         "objects": {"count": len(objs), "digest": digest(lines)},
         "script_types": [[s.local_serialized_file_index, s.local_identifier_in_file] for s in f.script_types],
         "externals": [e.path for e in f.externals],
-        "ref_types": len(f.ref_types or ()),
+        # UnityPy sets no reference types below container version 20
+        "ref_types": len(getattr(f, "ref_types", None) or ()),
         "user_information": f.userInformation or "",
     }
 
