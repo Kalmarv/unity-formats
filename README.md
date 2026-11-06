@@ -1,5 +1,7 @@
 # unity-formats
 
+[![crates.io: unity-formats](https://img.shields.io/crates/v/unity-formats?label=unity-formats)](https://crates.io/crates/unity-formats) [![docs.rs](https://img.shields.io/docsrs/unity-formats)](https://docs.rs/unity-formats) [![CI](https://img.shields.io/github/actions/workflow/status/Kalmarv/unity-formats/ci.yml?branch=main&label=CI)](https://github.com/Kalmarv/unity-formats/actions/workflows/ci.yml)
+
 A Rust library that reads the data files of built Unity games. It reads SerializedFiles, UnityFS bundles and streamed `.resS` data, and decodes the objects inside them into typed Rust values. A player build strips its type trees, so to read one you supply a type tree package (a TPK file) for the game's Unity version.
 
 ## Features
