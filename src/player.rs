@@ -975,7 +975,7 @@ mod tests {
     /// player; files that are no SerializedFile are still skipped.
     #[test]
     fn a_file_of_an_unread_version_is_refused_not_absent() {
-        for version in [20, 23] {
+        for version in [16, 23] {
             let dir = scratch(&format!("version{version}"));
             std::fs::write(dir.join("level0"), empty_file(21)).unwrap();
             std::fs::write(dir.join("sharedassets0.assets.resS"), [7u8; 100]).unwrap();
