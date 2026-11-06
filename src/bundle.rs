@@ -1,18 +1,20 @@
 //! UnityFS bundles: the archive AssetBundles, Addressables content and a player's `data.unity3d` are.
 //!
-//! Layout (format version 8, header flags `0x243`; every number big-endian): the signature `UnityFS\0`, the format
-//! version, the player version and the engine version (NUL-terminated), the bundle's size (`u64`), the compressed and
-//! the uncompressed size of the *block table* (`u32` each) and the header flags; then, aligned to 16 bytes, the block
-//! table, compressed as the low six bits of the flags say (0 none, 2 LZ4, 3 LZ4HC), and, when flag `0x200` is set,
-//! padding to 16 bytes; then the blocks. The decompressed block table holds a 16-byte hash, the blocks (`u32`
+//! Layout (format versions 6 to 8; every number big-endian): the signature `UnityFS\0`, the format version, the
+//! player version and the engine version (NUL-terminated), the bundle's size (`u64`), the compressed and the
+//! uncompressed size of the *block table* (`u32` each) and the header flags; then, from format 7 on aligned to 16 bytes,
+//! the block table, compressed as the low six bits of the flags say (0 none, 1 LZMA, 2 LZ4, 3 LZ4HC), unless flag `0x80`
+//! puts it at the end of the file instead; then, when flag `0x200` is set, padding to 16 bytes; then the blocks. The decompressed block table holds a 16-byte hash, the blocks (`u32`
 //! uncompressed size, `u32` compressed size, `u16` flags whose low six bits are the block's compression) and the nodes:
 //! the files in the blocks' concatenated bytes (`i64` offset, `i64` size, `u32` flags, a NUL-terminated path; flag `4`
 //! marks a SerializedFile, `0` a stream file such as `.resS`).
 //!
-//! What it reads, from the bundles of PEAK, Sledding Game and Big Walk: format 8, flags `0x243`, blocks stored or
-//! LZ4HC of at most 128 KiB. What it refuses, as [`Error::Unsupported`]: another format version, header flags other
-//! than those (the block table at the end of the file, a table not stored with the directory), a LZMA or LZHAM
-//! compressed block table or block, and compression numbers it does not know. A bundle whose sizes do not add up is
+//! The bundles of PEAK, Sledding Game and Big Walk are format 8, flags `0x243`, blocks stored or LZ4HC of at most
+//! 128 KiB. LZMA, as Unity writes it (the five property bytes and the raw stream, as UnityPy and AssetStudio read
+//! it), the formats before 8 and the table at the end of the file are read as UnityPy and AssetStudio read them, on
+//! bundles built in the tests. What it refuses, as [`Error::Unsupported`]: another format version, other header flags
+//! (a table not stored with the directory), a LZHAM compressed block table or block, and compression numbers it does
+//! not know. A bundle whose sizes do not add up is
 //! [`Error::Invalid`]. A node is read by range: only the blocks it touches are decompressed, a few recent blocks are
 //! kept, so a node of a gigabyte costs its reader nothing until it asks for bytes.
 #![allow(
@@ -26,21 +28,21 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use primase_foundations::compress::{Decompressor, Lz4};
+use primase_foundations::compress::{Decompressor, Lz4, Lzma};
 
 use crate::reader::Reader;
 use crate::{Error, Result, invalid};
 
 const MAGIC: &[u8; 8] = b"UnityFS\0";
 
-/// The format version read.
-pub const FORMAT_VERSION: u32 = 8;
+/// The format versions read: 6, and 7 on, whose block table starts at a multiple of 16.
+pub const FORMAT_VERSIONS: std::ops::RangeInclusive<u32> = 6..=8;
 
 /// Block table flags: the low six bits name its compression.
 const COMPRESSION_MASK: u32 = 0x3f;
 /// The block table is stored with the directory (the only layout read).
 const TABLE_WITH_DIRECTORY: u32 = 0x40;
-/// The block table is at the end of the file instead of after the header (refused).
+/// The block table is at the end of the file instead of after the header; the blocks follow the header.
 const TABLE_AT_END: u32 = 0x80;
 /// The blocks start at the next multiple of 16 after the table.
 const PAD_BEFORE_DATA: u32 = 0x200;
@@ -77,7 +79,7 @@ pub struct Block {
     pub uncompressed: u32,
     /// The block's size as stored.
     pub compressed: u32,
-    /// The block's flags; the low six bits are its compression (0 stored, 2 LZ4, 3 LZ4HC).
+    /// The block's flags; the low six bits are its compression (0 stored, 1 LZMA, 2 LZ4, 3 LZ4HC).
     pub flags: u16,
 }
 
@@ -138,12 +140,11 @@ impl fmt::Debug for Bundle {
 
 fn unsupported_compression(what: &str, code: u32) -> Error {
     let name = match code {
-        1 => "LZMA",
         4 => "LZHAM",
         _ => "an unknown compression",
     };
     Error::Unsupported(format!(
-        "{what} compressed with {name} (compression {code}); stored, LZ4 and LZ4HC are read"
+        "{what} compressed with {name} (compression {code}); stored, LZMA, LZ4 and LZ4HC are read"
     ))
 }
 
@@ -160,6 +161,9 @@ fn inflate(what: &str, compression: u32, bytes: &[u8], expected: usize) -> Resul
                 )))
             }
         }
+        1 => Lzma
+            .decompress(bytes, expected)
+            .map_err(|e| invalid(format!("{what}: LZMA: {e}"))),
         2 | 3 => Lz4
             .decompress(bytes, expected)
             .map_err(|e| invalid(format!("{what}: LZ4: {e}"))),
@@ -215,9 +219,11 @@ impl Bundle {
             return Err(invalid("not a UnityFS bundle (signature)"));
         }
         let format_version = r.u32()?;
-        if format_version != FORMAT_VERSION {
+        if !FORMAT_VERSIONS.contains(&format_version) {
             return Err(Error::Unsupported(format!(
-                "UnityFS format version {format_version} (read: {FORMAT_VERSION})"
+                "UnityFS format version {format_version} (read: {} to {})",
+                FORMAT_VERSIONS.start(),
+                FORMAT_VERSIONS.end()
             )));
         }
         let player_version = r.cstr()?;
@@ -247,29 +253,42 @@ impl Bundle {
                  {PAD_BEFORE_DATA:#x})"
             )));
         }
-        if flags & TABLE_AT_END != 0 {
-            return Err(Error::Unsupported(format!(
-                "UnityFS header flags {flags:#x}: the block table at the end of the file (no bundle read has it)"
-            )));
-        }
         if flags & TABLE_WITH_DIRECTORY == 0 {
             return Err(Error::Unsupported(format!(
                 "UnityFS header flags {flags:#x}: the block table not stored with the directory"
             )));
         }
-        // after the header the table starts at the next multiple of 16 (format 7 and later)
-        let table_at = u64::try_from(r.pos)
-            .ok()
-            .and_then(|p| p.checked_next_multiple_of(16))
-            .ok_or_else(|| invalid("header too long"))?;
-        let table_end = table_at
-            .checked_add(u64::from(table_compressed))
-            .filter(|&e| e <= len)
+        // from format 7 on, what follows the header starts at the next multiple of 16
+        let header_end = u64::try_from(r.pos).map_err(|_| invalid("header too long"))?;
+        let header_end = if format_version >= 7 {
+            header_end
+                .checked_next_multiple_of(16)
+                .ok_or_else(|| invalid("header too long"))?
+        } else {
+            header_end
+        };
+        let at_end = flags & TABLE_AT_END != 0;
+        let table_at = if at_end {
+            len.checked_sub(u64::from(table_compressed))
+                .filter(|&at| at >= header_end)
+        } else {
+            Some(header_end)
+        };
+        let (table_at, table_end) = table_at
+            .and_then(|at| Some((at, at.checked_add(u64::from(table_compressed))?)))
+            .filter(|&(_, end)| end <= len)
             .ok_or_else(|| {
                 invalid(format!(
-                    "the block table ({table_compressed} bytes at {table_at}) is past the file's {len} bytes"
+                    "the block table ({table_compressed} bytes) does not fit the file's {len} bytes after its \
+                     {header_end}-byte header"
                 ))
             })?;
+        // the blocks follow the table, or the header when the table is at the end; they end where the table starts
+        let (before_data, data_end) = if at_end {
+            (header_end, table_at)
+        } else {
+            (table_end, len)
+        };
         source.seek(SeekFrom::Start(table_at)).map_err(io)?;
         let mut packed = vec![0; usize::try_from(table_compressed).map_err(|_| invalid("block table size"))?];
         source.read_exact(&mut packed).map_err(io)?;
@@ -295,11 +314,11 @@ impl Bundle {
                 ))
             })?;
         let data_at = if flags & PAD_BEFORE_DATA != 0 {
-            table_end
+            before_data
                 .checked_next_multiple_of(16)
                 .ok_or_else(|| invalid("data offset"))?
         } else {
-            table_end
+            before_data
         };
         let mut blocks = Vec::with_capacity(block_count);
         let (mut data_len, mut file_at) = (0u64, data_at);
@@ -310,7 +329,7 @@ impl Bundle {
                 flags: t.u16()?,
             };
             let compression = u32::from(block.flags) & COMPRESSION_MASK;
-            if !matches!(compression, 0 | 2 | 3) {
+            if !matches!(compression, 0..=3) {
                 return Err(unsupported_compression(&format!("block {i}"), compression));
             }
             if compression == 0 && block.compressed != block.uncompressed {
@@ -331,9 +350,14 @@ impl Bundle {
                 .checked_add(u64::from(block.compressed))
                 .ok_or_else(|| invalid("blocks add up past 2^64 bytes"))?;
         }
-        if file_at != len {
+        if file_at != data_end {
             return Err(invalid(format!(
-                "the blocks end at {file_at} (data at {data_at}), the file has {len} bytes"
+                "the blocks end at {file_at} (data at {data_at}), not at {data_end} where the {} ends",
+                if at_end {
+                    "data before the block table"
+                } else {
+                    "file"
+                }
             )));
         }
         let node_count = t.i32()?;
@@ -598,9 +622,39 @@ mod tests {
         out
     }
 
+    /// LZMA as Unity stores it: the five property bytes and the raw stream, no size and no end marker.
+    fn unity_lzma(data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let options = lzma_rs::compress::Options {
+            unpacked_size: lzma_rs::compress::UnpackedSize::SkipWritingToHeader,
+        };
+        lzma_rs::lzma_compress_with_options(&mut &data[..], &mut out, &options).unwrap();
+        out
+    }
+
+    fn compressed(data: &[u8], compression: u32) -> Vec<u8> {
+        match compression {
+            0 => data.to_vec(),
+            1 => unity_lzma(data),
+            _ => literal_lz4(data),
+        }
+    }
+
     /// A bundle of format 8 built the way the games' are: the table with the directory, padded to 16, data padded.
     /// Each block is (bytes, compression).
     fn build(
+        blocks: &[(&[u8], u32)],
+        nodes: &[(i64, i64, u32, &str)],
+        table_compression: u32,
+        flags: u32,
+    ) -> Vec<u8> {
+        build_format(8, blocks, nodes, table_compression, flags)
+    }
+
+    /// A bundle of a format version as UnityPy and AssetStudio read one: the header aligned to 16 from format 7 on,
+    /// then the table (or, with flag 0x80, the blocks, and the table last), the blocks padded to 16 with flag 0x200.
+    fn build_format(
+        format: u32,
         blocks: &[(&[u8], u32)],
         nodes: &[(i64, i64, u32, &str)],
         table_compression: u32,
@@ -610,10 +664,7 @@ mod tests {
         table.extend((blocks.len() as i32).to_be_bytes());
         let mut data = Vec::new();
         for (bytes, compression) in blocks {
-            let stored = match compression {
-                0 => bytes.to_vec(),
-                _ => literal_lz4(bytes),
-            };
+            let stored = compressed(bytes, *compression);
             table.extend((bytes.len() as u32).to_be_bytes());
             table.extend((stored.len() as u32).to_be_bytes());
             table.extend((*compression as u16).to_be_bytes());
@@ -627,13 +678,9 @@ mod tests {
             table.extend(path.as_bytes());
             table.push(0);
         }
-        let packed = if table_compression == 0 {
-            table.clone()
-        } else {
-            literal_lz4(&table)
-        };
+        let packed = compressed(&table, table_compression);
         let mut out = b"UnityFS\0".to_vec();
-        out.extend(8u32.to_be_bytes());
+        out.extend(format.to_be_bytes());
         out.extend(b"5.x.x\0");
         out.extend(b"6000.3.15f1\0");
         let size_at = out.len();
@@ -641,12 +688,20 @@ mod tests {
         out.extend((packed.len() as u32).to_be_bytes());
         out.extend((table.len() as u32).to_be_bytes());
         out.extend(flags.to_be_bytes());
-        out.resize(out.len().next_multiple_of(16), 0);
-        out.extend(packed);
+        if format >= 7 {
+            out.resize(out.len().next_multiple_of(16), 0);
+        }
+        let at_end = flags & TABLE_AT_END != 0;
+        if !at_end {
+            out.extend(&packed);
+        }
         if flags & PAD_BEFORE_DATA != 0 {
             out.resize(out.len().next_multiple_of(16), 0);
         }
         out.extend(data);
+        if at_end {
+            out.extend(&packed);
+        }
         let total = out.len() as u64;
         out[size_at..size_at + 8].copy_from_slice(&total.to_be_bytes());
         out
@@ -717,6 +772,71 @@ mod tests {
         );
     }
 
+    /// LZMA blocks and an LZMA table, as Unity writes them, read to the same bytes as the stored ones; a block whose
+    /// LZMA makes fewer bytes than the table says is refused.
+    #[test]
+    fn lzma_tables_and_blocks_are_read() {
+        let a: Vec<u8> = (0..40u8).collect();
+        let b: Vec<u8> = b"Unity's LZMA has no end marker. ".repeat(9);
+        let all: Vec<u8> = a.iter().chain(&b).copied().collect();
+        let nodes = [(0, 30, 4, "first"), (30, 298, 0, "second.resS")];
+        let bundle = open(build(&[(&a, 1), (&b, 1)], &nodes, 1, 0x241)).unwrap();
+        assert_eq!(bundle.blocks().nth(1).unwrap().flags, 1);
+        for node in bundle.nodes() {
+            let (from, size) = (node.offset as usize, node.size as usize);
+            assert_eq!(
+                bundle.read_node(node).unwrap(),
+                all[from..from + size],
+                "{}",
+                node.path
+            );
+        }
+        let mut short = build(&[(&a, 3), (&b, 1)], &nodes, 0, 0x240);
+        // the second block's uncompressed size: after the hash, the count and the first block's ten bytes
+        let table_at = short.windows(16).position(|w| w == [7; 16]).unwrap();
+        let size_at = table_at + 16 + 4 + 10;
+        short[size_at..size_at + 4].copy_from_slice(&(b.len() as u32 + 1).to_be_bytes());
+        // the node fits the claimed size; the read finds the LZMA one byte short
+        let bundle = open(short).unwrap();
+        let e = bundle
+            .read_node(bundle.node("second.resS").unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("LZMA"), "{e}");
+    }
+
+    /// Formats 6 and 7 and a block table at the end of the file read the bytes format 8 with the table first does,
+    /// with and without padding before the blocks; a format 6 header is not aligned, so the same bundle read as
+    /// format 7 is refused.
+    #[test]
+    fn older_formats_and_a_table_at_the_end_are_read() {
+        let a: Vec<u8> = (0..40u8).collect();
+        let b: Vec<u8> = (100..130u8).collect();
+        let blocks: [(&[u8], u32); 2] = [(&a, 3), (&b, 1)];
+        let nodes = [(0, 25, 4, "first"), (25, 45, 0, "second")];
+        let all: Vec<u8> = a.iter().chain(&b).copied().collect();
+        for format in 6..=8 {
+            for flags in [0x43, 0x243, 0xc3, 0x2c1, 0xc0] {
+                let bytes = build_format(format, &blocks, &nodes, flags & 0x3f, flags);
+                let bundle = open(bytes).unwrap_or_else(|e| panic!("format {format} flags {flags:#x}: {e}"));
+                assert_eq!(bundle.header().format_version, format);
+                for node in bundle.nodes() {
+                    let (from, size) = (node.offset as usize, node.size as usize);
+                    assert_eq!(
+                        bundle.read_node(node).unwrap(),
+                        all[from..from + size],
+                        "format {format} flags {flags:#x} {}",
+                        node.path
+                    );
+                }
+            }
+        }
+        // "UnityFS\0", the version, "5.x.x\0", "6000.3.15f1\0" and 20 bytes of sizes and flags end at byte 50
+        let mut six = build_format(6, &blocks, &nodes, 0, 0x40);
+        six[11] = 7;
+        assert!(open(six).is_err());
+    }
+
     /// What the reader does not read is refused with the reason, and a damaged bundle with what is wrong.
     #[test]
     fn refusals_name_their_reason() {
@@ -726,9 +846,7 @@ mod tests {
             open(build(&[(&a, 3)], &[(0, 10, 4, "n")], 3, flags))
         };
         for (flags, needle) in [
-            (0x241, "LZMA"),
             (0x244, "LZHAM"),
-            (0x2c3, "end of the file"),
             (0x203, "not stored with the directory"),
             (0x1243, "header flags"),
         ] {
@@ -736,13 +854,29 @@ mod tests {
             assert!(matches!(e, Error::Unsupported(_)), "{flags:#x}: {e}");
             assert!(e.to_string().contains(needle), "{flags:#x}: {e}");
         }
-        let mut v7 = good.clone();
-        v7[11] = 7;
-        let e = open(v7).unwrap_err();
+        for format in [5, 9] {
+            let mut other = good.clone();
+            other[11] = format;
+            let e = open(other).unwrap_err();
+            assert!(
+                matches!(e, Error::Unsupported(_))
+                    && e.to_string().contains(&format!("format version {format}")),
+                "{e}"
+            );
+        }
+        let a: Vec<u8> = (0..40u8).collect();
+        let lzham = open(build(&[(&a, 4)], &[(0, 10, 4, "n")], 0, 0x240)).unwrap_err();
         assert!(
-            matches!(e, Error::Unsupported(_)) && e.to_string().contains("format version 7"),
-            "{e}"
+            lzham.to_string().contains("block 0 compressed with LZHAM"),
+            "{lzham}"
         );
+        // a table at the end that claims more bytes than follow the header
+        let mut long_table = build(&[(&a, 0)], &[(0, 10, 4, "n")], 0, 0xc0);
+        // the table's compressed size follows "UnityFS\0", the version, the two version strings and the bundle size
+        let compressed_at = 8 + 4 + 6 + 12 + 8;
+        long_table[compressed_at..compressed_at + 4].copy_from_slice(&1000u32.to_be_bytes());
+        let e = open(long_table).unwrap_err().to_string();
+        assert!(e.contains("does not fit"), "{e}");
         let mut magic = good.clone();
         magic[0] = b'X';
         assert!(open(magic).unwrap_err().to_string().contains("signature"));

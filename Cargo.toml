@@ -20,6 +20,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+lzma-rs.workspace = true
 primase-testdata.workspace = true
 sha2.workspace = true
 xxhash-rust.workspace = true
@@ -31,7 +32,7 @@ workspace = true
 
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.99"
 license = "GPL-3.0-or-later"
@@ -40,8 +41,9 @@ publish = true
 
 [workspace.dependencies]
 half = { version = "=2.7.1", default-features = false }
-primase-foundations = "0.3.1"
-primase-testdata = "0.1.8"
+lzma-rs = { version = "=0.3.0", default-features = false }
+primase-foundations = "0.3.5"
+primase-testdata = "0.1.9"
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "=1.0.154", default-features = false, features = ["std", "preserve_order", "float_roundtrip"] }
 sha2 = { version = "=0.11.1", default-features = false }

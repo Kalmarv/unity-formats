@@ -7,7 +7,7 @@ A Rust library that reads the data files of built Unity games. It reads Serializ
 ## Features
 
 - Reads SerializedFile containers of versions 21 and 22
-- Reads UnityFS bundles of format 8 with stored, LZ4 or LZ4HC blocks, including a player's `data.unity3d`
+- Reads UnityFS bundles of formats 6 to 8 with stored, LZMA, LZ4 or LZ4HC blocks and the block table first or last, including a player's `data.unity3d`
 - Decodes objects through a file's stored type trees or through a TPK type tree package (uncompressed or LZ4)
 - Follows object references across a player's files and reads streamed `.resS` and `.resource` data, loose or bundled
 - Reads scenes: GameObjects, Transforms composed to world matrices, renderers, LOD groups, colliders, lights, cameras, terrains, ambient and fog settings
@@ -26,7 +26,7 @@ A Rust library that reads the data files of built Unity games. It reads Serializ
 ### Requirements
 
 - Rust 1.99 or later (the repository pins 1.99.0 in `rust-toolchain.toml`)
-- A type tree package (`.tpk`) covering the game's Unity version, which you supply; the crate ships none, and refuses LZMA- or Brotli-compressed packages
+- A type tree package (`.tpk`) covering the game's Unity version, which you supply (uncompressed, LZ4, LZMA or Brotli); the crate ships none
 
 ### Installation
 

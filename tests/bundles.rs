@@ -33,7 +33,7 @@ fn bundles(game: Game) -> Option<Vec<PathBuf>> {
             |n| n.ends_with(".bundle"),
         ),
         Game::Bigwalk => (install_file(game, "Big Walk_Data")?, |n| n == "data.unity3d"),
-        Game::Skatebird => return None,
+        Game::Skatebird | Game::General => return None,
     };
     let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()
@@ -159,7 +159,7 @@ fn expected(game: Game) -> Counts {
             objects: 659_824,
             node_bytes: 5_714_422_612,
         },
-        Game::Skatebird => unreachable!("SkateBIRD has no bundle"),
+        Game::Skatebird | Game::General => unreachable!("not a game with bundles"),
     }
 }
 
@@ -284,7 +284,7 @@ fn expected_decoded(game: Game) -> Decoded {
             no_tree: 659_824,
             ..Decoded::default()
         },
-        Game::Skatebird => unreachable!("SkateBIRD has no bundle"),
+        Game::Skatebird | Game::General => unreachable!("not a game with bundles"),
     }
 }
 

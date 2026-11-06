@@ -12,6 +12,7 @@ primase_testdata::inputs! {
         Peak = "peak",
         Sledding = "sledding",
         Bigwalk = "bigwalk",
+        General = "general",
     }
     installs {
         Skatebird {
@@ -44,12 +45,34 @@ primase_testdata::inputs! {
         },
     }
     oracle_sets {
+        Corpus = "corpus" {
+            about: "other tools' public files, kept beside the oracles so the tests read them as those tools read them",
+            source: "the tools' own repositories and CI, at the commit each entry names",
+        },
         UnityPy = "unitypy" {
             about: "UnityPy's readings of a Unity player (the object-table census these tests use; tests/oracles/unitypy_census.py makes it) and of its bundles (tests/oracles/unitypy_bundles.py)",
             source: "independent: UnityPy (https://github.com/K0lb3/UnityPy), run by the scripts in tests/oracles",
         },
     }
     declared {
+        Query::Oracle(OracleSet::Corpus, Game::General, "unitypy-samples") => {
+            status: Live,
+            gate: true,
+            about: r#"UnityPy's test bundles `atlas_test`, `banner_1`, `char_118_yuki.ab` and `xinzexi_2_n_tex` (UnityFS format 6, LZ4HC, Unity 5.6.7 to 2018.4; SerializedFile version 17), read by tests/public_samples.rs"#,
+            source: r#"UnityPy's repository (https://github.com/K0lb3/UnityPy) at 417d5952, `tests/samples` (Git LFS)"#,
+        },
+        Query::Oracle(OracleSet::UnityPy, Game::General, "samples.json") => {
+            status: Live,
+            gate: true,
+            about: r#"UnityPy's reading of those bundles: format, header flags, every node's path, size and SHA-256 (JSON; tests/oracles/unitypy_samples.py makes it, tests/public_samples.rs compares)"#,
+            source: r#"independent: UnityPy 1.25.4 (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_samples.py"#,
+        },
+        Query::Oracle(OracleSet::Corpus, Game::General, "assetripper-tpk") => {
+            status: Live,
+            gate: true,
+            about: r#"AssetRipper's type tree package in its four compressions (`uncompressed.tpk`, `lz4.tpk`, `lzma.tpk`, `brotli.tpk`), read by tests/public_samples.rs"#,
+            source: r#"AssetRipper/Tpk's CI artifacts of run 41278032151 (commit 94549d10, 2026-11-01)"#,
+        },
         Query::Install(Game::Skatebird, Some("SkateBIRD_Data")) => {
             status: Live,
             gate: true,

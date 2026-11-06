@@ -1,8 +1,8 @@
 //! Type tree packages (TPK, "TPK*" files): the layouts of Unity's built-in classes for every Unity version, which a
-//! player build strips from its files. Format versions 1 and 2, type tree data, uncompressed or LZ4 (LZMA and
-//! Brotli packages are refused: re-pack them uncompressed).
+//! player build strips from its files. Format versions 1 and 2, type tree data, uncompressed, LZ4, LZMA or Brotli:
+//! each of AssetRipper's four packages of the same layouts reads to the same bytes.
 
-use primase_foundations::compress::{Decompressor, LZ4_MAX_RATIO, Lz4};
+use primase_foundations::compress::{Brotli, Decompressor, LZ4_MAX_RATIO, Lz4, Lzma};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -139,9 +139,9 @@ fn count(r: &mut Reader, what: &str) -> Result<usize> {
 const MAX_TREE_NODES: usize = 1 << 20;
 
 impl TypeTreePackage {
-    /// Parse a type tree package (TPK format 1 or 2, uncompressed or LZ4). Every index in it is checked, the size an
-    /// LZ4 block claims is checked against what LZ4 can inflate to before anything is allocated for it, and a package
-    /// that is LZMA- or Brotli-compressed is refused as [`crate::Error::Unsupported`].
+    /// Parse a type tree package (TPK format 1 or 2, uncompressed, LZ4, LZMA or Brotli). Every index in it is checked,
+    /// the size an LZ4 block claims is checked against what LZ4 can inflate to before anything is allocated for it, and
+    /// LZMA and Brotli output grows only as the stream makes it.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let mut r = Reader::new(bytes, false);
         if r.u32()? != MAGIC {
@@ -177,16 +177,13 @@ impl TypeTreePackage {
                 Lz4.decompress(packed, uncompressed)
                     .map_err(|e| invalid(format!("TPK LZ4: {e}")))?
             }
-            2 => {
-                return Err(Error::Unsupported(
-                    "LZMA-compressed TPK: use an uncompressed or LZ4 package".into(),
-                ));
-            }
-            3 => {
-                return Err(Error::Unsupported(
-                    "Brotli-compressed TPK: use an uncompressed or LZ4 package".into(),
-                ));
-            }
+            // the five LZMA property bytes and the raw stream, as AssetRipper writes them
+            2 => Lzma
+                .decompress(packed, uncompressed)
+                .map_err(|e| invalid(format!("TPK LZMA: {e}")))?,
+            3 => Brotli
+                .decompress(packed, uncompressed)
+                .map_err(|e| invalid(format!("TPK Brotli: {e}")))?,
             c => return Err(invalid(format!("TPK compression type {c}"))),
         };
         if blob.len() != uncompressed {
@@ -533,6 +530,47 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("inflate to at most"), "{e}");
+    }
+
+    /// A Brotli stream of one uncompressed meta-block, encoded by hand (RFC 7932 9.2): a 16-bit window, a meta-block
+    /// that is not last with four length nibbles, its length less one and the uncompressed bit, padding to the byte,
+    /// the bytes, then an empty last meta-block.
+    fn stored_brotli(blob: &[u8]) -> Vec<u8> {
+        let header = (u32::try_from(blob.len() - 1).unwrap() << 4) | (1 << 20);
+        let mut out = header.to_le_bytes()[..3].to_vec();
+        out.extend(blob);
+        out.push(0b11);
+        out
+    }
+
+    /// LZMA as AssetRipper stores it (property bytes and raw stream) and Brotli read the same package as the stored
+    /// one; a wrong size or a damaged stream is refused.
+    #[test]
+    fn lzma_and_brotli_packages_match_uncompressed() {
+        let blob = one_class_blob();
+        let n = blob.len() as u32;
+        let mut lzma = Vec::new();
+        let options = lzma_rs::compress::Options {
+            unpacked_size: lzma_rs::compress::UnpackedSize::SkipWritingToHeader,
+        };
+        lzma_rs::lzma_compress_with_options(&mut &blob[..], &mut lzma, &options).unwrap();
+        let brotli = stored_brotli(&blob);
+        let raw = TypeTreePackage::parse(&package(0, &blob, n)).unwrap();
+        for (compression, packed) in [(2, &lzma), (3, &brotli)] {
+            let p = TypeTreePackage::parse(&package(compression, packed, n)).unwrap();
+            assert_eq!(p.class_name(1, UnityVersion(1)), Some("Base"));
+            assert_eq!(&*p.strings, &*raw.strings);
+            assert_eq!(p.nodes.len(), raw.nodes.len());
+            for expected in [n - 1, n + 1] {
+                assert!(TypeTreePackage::parse(&package(compression, packed, expected)).is_err());
+            }
+            let cut = &packed[..packed.len() - 1];
+            assert!(TypeTreePackage::parse(&package(compression, cut, n)).is_err());
+        }
+        let e = TypeTreePackage::parse(&package(4, &blob, n))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("compression type 4"), "{e}");
     }
 
     /// Nodes that name each other twice over are copied under each parent: thirty levels would be 2^30 nodes. The copy

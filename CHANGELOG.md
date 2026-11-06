@@ -1,7 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-11-06)
 
+- **Breaking:** `bundle::FORMAT_VERSION` is `bundle::FORMAT_VERSIONS` (6 to 8). UnityFS bundles of formats 6 and 7, LZMA
+  compressed block tables and blocks (Unity's form: the five property bytes and the raw stream), and the block table at
+  the end of the file (header flag `0x80`, the blocks right after the header) are read as UnityPy and AssetStudio read
+  them; before, each was refused. A format 6 header is not aligned to 16, format 7 and 8 headers are. LZHAM is still
+  refused. Bundles built in the tests in every combination read the same bytes, and UnityPy's own format 6 test
+  bundles (Unity 5.6.7 to 2018.4) read every node to the bytes UnityPy reads.
+- Type tree packages compressed with LZMA or Brotli are read (`TypeTreePackage::parse`, compressions 2 and 3); before,
+  they were refused. AssetRipper's LZMA and Brotli packages (its Tpk CI's artifacts of 2026-11-01) decode to the same
+  1,538,989 bytes as its uncompressed one.
 - `ShaderPrograms::variant_parameters` gives the parameters a variant is compiled with wherever the player keeps them: the variant's own (before 2021.2), the pass's common ones merged with its parameter blob entry (2021.2 on), else the pass's.
 - The `program_keys` example lists every D3D11 variant of a player's Shaders as a line of JSON that `locum-cli index --programs` reads: the XXH3-128 key of its DXBC container, its name (`<shader> <subshader>.<pass> <stage> [<keywords>]`), and its constant buffers, textures and texture samplers in the shape of locum's shader reflection, so a frame captured from the game names the programs, constants and textures Unity strips from the bytecode. 90 of the 93 programs of a SkateBIRD (Unity 2019.4) title-screen capture and 26 of the 28 of a Hollow Knight (Unity 6000.0) one match a listed key; the rest are the Steam overlay's and a ComputeShader, which the example does not read.
 - The `mesh_keys` example lists the XXH3-128 keys of every Mesh's vertex streams, whole vertex data and index buffer in a player, as `key<TAB>bytes<TAB>name` lines that `locum-cli index --keys` reads, so the buffers of a frame captured from the game are named by the meshes they came from. A stream's stride is the sum of its channels' sizes by Unity 2019 on's vertex formats and each stream starts 16-byte aligned; every one of SkateBIRD's (Unity 2019.4) 7,491 and Hollow Knight's (Unity 6000.0) 3,941 meshes lays out to its stored bytes so, and a mesh that does not is reported and keyed whole. A SkateBIRD title-screen capture (D3D11) has 183 of its 209 buffers named this way, and Hollow Knight's D3D12 captures name the built-in `Plane`'s vertex and index buffers.

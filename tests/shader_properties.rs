@@ -21,7 +21,7 @@ fn data_folder(game: Game) -> Option<PathBuf> {
         Game::Skatebird => install_file(game, "SkateBIRD_Data"),
         Game::Sledding => install_file(game, "Sledding Game_Data"),
         Game::Peak => install_file(game, "PEAK_Data"),
-        Game::Bigwalk => None,
+        Game::Bigwalk | Game::General => None,
     }
 }
 

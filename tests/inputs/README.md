@@ -24,12 +24,16 @@ fails when they differ); [the README](../../README.md#running-the-tests) says ho
 
 | set | about | source |
 | --- | --- | --- |
+| `oracles.corpus` | other tools' public files, kept beside the oracles so the tests read them as those tools read them | the tools' own repositories and CI, at the commit each entry names |
 | `oracles.unitypy` | UnityPy's readings of a Unity player (the object-table census these tests use; tests/oracles/unitypy_census.py makes it) and of its bundles (tests/oracles/unitypy_bundles.py) | independent: UnityPy (https://github.com/K0lb3/UnityPy), run by the scripts in tests/oracles |
 
 #### Declared files
 
 | key | status | gate | about | source |
 | --- | --- | --- | --- | --- |
+| `oracles.corpus.general/unitypy-samples` | live | yes | UnityPy's test bundles `atlas_test`, `banner_1`, `char_118_yuki.ab` and `xinzexi_2_n_tex` (UnityFS format 6, LZ4HC, Unity 5.6.7 to 2018.4; SerializedFile version 17), read by tests/public_samples.rs | UnityPy's repository (https://github.com/K0lb3/UnityPy) at 417d5952, `tests/samples` (Git LFS) |
+| `oracles.unitypy.general/samples.json` | live | yes | UnityPy's reading of those bundles: format, header flags, every node's path, size and SHA-256 (JSON; tests/oracles/unitypy_samples.py makes it, tests/public_samples.rs compares) | independent: UnityPy 1.25.4 (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_samples.py |
+| `oracles.corpus.general/assetripper-tpk` | live | yes | AssetRipper's type tree package in its four compressions (`uncompressed.tpk`, `lz4.tpk`, `lzma.tpk`, `brotli.tpk`), read by tests/public_samples.rs | AssetRipper/Tpk's CI artifacts of run 41278032151 (commit 94549d10, 2026-11-01) |
 | `installs.skatebird/SkateBIRD_Data` | live | yes | SkateBIRD's data folder (`SkateBIRD_Data`, a Unity 2019.4.20f1 player: SerializedFile version 21 containers), parsed by tests/serialized_census.rs; the SkateBIRD tests of primase read it too ([worlds/skatebird/tests/markers.rs](https://github.com/Kalmarv/primase/tree/main/worlds/skatebird/tests/markers.rs)) | the user's own install |
 | `oracles.unitypy.skatebird/census.json` | live | yes | an independent UnityPy object-table census of that folder (JSON; its schema is the `Census` struct of tests/serialized_census.rs) | independent: UnityPy (https://github.com/K0lb3/UnityPy), run by tests/oracles/unitypy_census.py |
 | `installs.peak/PEAK_Data` | live | yes | PEAK's data folder (`PEAK_Data`: the loose player files and `StreamingAssets/maps`, the level AssetBundles), whose level 207 tests/bundles.rs reads with its bundle | the user's own install |
